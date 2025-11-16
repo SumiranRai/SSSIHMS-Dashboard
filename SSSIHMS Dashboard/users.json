@@ -1,0 +1,14 @@
+{
+    "admin": {
+        "password": "sairam",
+        "role": "admin"
+    },
+    "doctor1": {
+        "password": "abcde",
+        "role": "user"
+    },
+    "nurse1": {
+        "password": "pass123",
+        "role": "user"
+    }
+}
