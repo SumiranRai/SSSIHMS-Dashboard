@@ -4,18 +4,14 @@ import hashlib
 import base64
 from pathlib import Path
 
-# ==============================================
-# STREAMLIT CONFIG
-# ==============================================
+# Page config
 st.set_page_config(
     page_title="🏥 SSSIHMS Dashboard Login",
     page_icon="🏥",
     layout="centered"
 )
 
-# ==============================================
-# ORACLE CLIENT INIT
-# ==============================================
+# Oracle client init
 oracledb.init_oracle_client(
     lib_dir=r"C:\Users\sumir\Downloads\instantclient-basic-windows.x64-23.9.0.25.07\instantclient_23_9"
 )
@@ -27,48 +23,33 @@ def get_connection():
         dsn="192.168.21.6:1521/hisdb"
     )
 
-# ==============================================
-# PASSWORD HASHING (SHA-256)
-# ==============================================
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest().lower()
 
-# ==============================================
-# VERIFY USER (USING STAFFMASTER TABLE)
-# ==============================================
 def verify_user_from_db(staffid, password):
     try:
         conn = get_connection()
         cur = conn.cursor()
-
         encrypted = hash_password(password)
-
         query = """
             SELECT STAFFNAME, LOGINOK, ACCESS_ROLE, HOSPITALID
             FROM STAFFMASTER
             WHERE STAFFID = :staffid
               AND TXTPASSWD = :pwd
         """
-
         cur.execute(query, {"staffid": staffid, "pwd": encrypted})
         row = cur.fetchone()
-
         if row is None:
             return None
-
         staffname, loginok, access_role, hospitalid = row
-
         if loginok != "Y":
             return "NOT_ACTIVE"
-
         role = "admin" if access_role == "A" else "staff"
-
         return {
             "staffname": staffname, 
             "role": role,
             "hospitalid": hospitalid
         }
-
     except Exception as e:
         st.error(f"Database error: {e}")
         return None
@@ -78,9 +59,7 @@ def verify_user_from_db(staffid, password):
         if 'conn' in locals():
             conn.close()
 
-# ==============================================
-# SESSION DEFAULTS
-# ==============================================
+# Session defaults
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
     st.session_state.username = ""
@@ -88,11 +67,19 @@ if "authenticated" not in st.session_state:
     st.session_state.role = "staff"
     st.session_state.hospitalid = None
 
-# ==============================================
-# SOFT & SMOOTH DESIGN - NO SCROLL
-# ==============================================
+# CSS with HIDDEN SIDEBAR
 st.markdown("""
     <style>
+    /* ========== HIDE SIDEBAR NAVIGATION ========== */
+    [data-testid="stSidebar"] {
+        display: none;
+    }
+    
+    button[kind="header"] {
+        display: none;
+    }
+    /* ============================================== */
+    
     /* Global Styles */
     .stApp {
         background: linear-gradient(135deg, #0a0a0a 0%, #1a1a2e 50%, #0f3460 100%);
@@ -277,23 +264,18 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# ==============================================
-# LOGO LOADING
-# ==============================================
+# Logo loading
 def get_base64_image(image_path):
     with open(image_path, "rb") as img_file:
         return base64.b64encode(img_file.read()).decode()
 
-# Try to load logo, fallback to emoji if not found
 try:
     logo_base64 = get_base64_image("assets/hospital_logo.png")
     logo_html = f'<div class="logo-container"><img src="data:image/png;base64,{logo_base64}" class="logo-img" alt="SSSIHMS Logo"></div>'
 except:
     logo_html = '<div class="logo-container"><div class="hospital-icon">🏥</div></div>'
 
-# ==============================================
-# LOGIN UI - COMPACT
-# ==============================================
+# Login UI
 st.markdown(f"""
     <div class='login-outer-container'>
         <div class='login-header'>
@@ -304,46 +286,35 @@ st.markdown(f"""
         <div class='divider'></div>
 """, unsafe_allow_html=True)
 
-# Create login form - compact
 username = st.text_input("👤 Staff ID", placeholder="Enter staff ID", key="username_input")
 password = st.text_input("🔒 Password", type="password", placeholder="Enter password", key="password_input")
-
 login_button = st.button("Login", use_container_width=True)
 
-# ==============================================
-# LOGIN LOGIC
-# ==============================================
+# Login logic
 if login_button:
     if not username or not password:
         st.error("⚠️ Please enter both Staff ID and Password")
     else:
         with st.spinner("Authenticating..."):
             result = verify_user_from_db(username, password)
-
             if result is None:
                 st.error("❌ Invalid Staff ID or Password")
-
             elif result == "NOT_ACTIVE":
                 st.error("🚫 Your login is not yet activated. Please contact admin.")
-
             else:
                 st.session_state.authenticated = True
                 st.session_state.username = username
                 st.session_state.staffname = result["staffname"]
                 st.session_state.role = result["role"]
                 st.session_state.hospitalid = result["hospitalid"]
-
                 if result["role"] == "admin":
                     st.success(f"🛠️ Admin Access - Welcome {result['staffname']}!")
                 else:
                     st.success(f"✅ Welcome back, {result['staffname']}!")
-
                 if result["hospitalid"]:
                     st.markdown(f"<div class='info-badge'>🏥 Hospital: {result['hospitalid']}</div>", unsafe_allow_html=True)
-
                 st.switch_page("pages/dashboard.py")
 
-# Footer
 st.markdown("""
         <div class='footer-text'>
             🔒 Secured Access | SSSIHMS © 2025

@@ -1,0 +1,29 @@
+{
+  "male": {
+    "name": "Male",
+    "icon": "\ud83d\udcca",
+    "color": "kpi-grad-1",
+    "description": "Male Counts",
+    "query": "SELECT LEAST(COUNT(*), 1000) AS MALE_COUNT_LIMITED\nFROM PATIENT\nWHERE GENDER = 'M'\n",
+    "type": "single_value",
+    "created_date": "2025-11-18 12:48:38"
+  },
+  "total_": {
+    "name": "Total ",
+    "icon": "\ud83d\udcca",
+    "color": "kpi-grad-3",
+    "description": "Total Patients",
+    "query": "SELECT COUNT(*) AS TOTAL_PATIENTS\nFROM PATIENT\n",
+    "type": "single_value",
+    "created_date": "2025-11-18 13:02:10"
+  },
+  "random_rows": {
+    "name": "Random Rows",
+    "icon": "\ud83d\udcca",
+    "color": "kpi-grad-3",
+    "description": "Patients",
+    "query": "SELECT *\nFROM (\n    SELECT *\n    FROM PATIENT\n    ORDER BY DBMS_RANDOM.VALUE\n)\nWHERE ROWNUM <= 10\n",
+    "type": "table",
+    "created_date": "2025-11-18 13:07:53"
+  }
+}
