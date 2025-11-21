@@ -600,66 +600,7 @@ def inject_modern_css():
     }
     /* ================================================== */
     
-                /* ========== MOBILE RESPONSIVENESS ========== */
-    @media (max-width: 768px) {
-        .kpi-card {
-            padding: 16px 12px;
-            margin-bottom: 12px;
-        }
-        
-        .kpi-value {
-            font-size: 28px;
-        }
-        
-        .kpi-title {
-            font-size: 11px;
-        }
-        
-        .kpi-icon {
-            font-size: 28px;
-        }
-        
-        .section-header h2 {
-            font-size: 20px;
-        }
-        
-        .breadcrumb {
-            padding: 10px 16px;
-            font-size: 12px;
-        }
-        
-        /* Stack columns on mobile */
-        .stColumns {
-            flex-direction: column;
-        }
-        
-        /* Adjust button sizes */
-        .stButton button {
-            font-size: 14px;
-            padding: 8px 16px;
-        }
-        
-        /* Make tables scrollable */
-        .dataframe {
-            overflow-x: auto;
-        }
-    }
     
-    @media (max-width: 480px) {
-        .kpi-card {
-            padding: 12px 8px;
-        }
-        
-        .kpi-value {
-            font-size: 24px;
-        }
-        
-        .section-header {
-            padding: 16px 20px;
-        }
-    }
-    /* ============================================= */
-                
     /* Global */
     .main { 
         background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); 
@@ -1358,12 +1299,7 @@ def build_hospital_where(alias_list):
 # Data functions
 # -------------------------
 def calculate_bed_occupancy(from_date, to_date, dept_name=None, location_filter=None):
-    """
-    Calculate bed occupancy rate using CENSUSDATA and BEDMASTER
-    Formula: Daily Occupancy = OPBAL + ADMIT - DISCH + TRIN - TROUT - DEATH
-    
-    Returns: occupancy_rate (%), avg_daily_census, total_beds, detail_df
-    """
+    """Calculate bed occupancy with proper department filtering"""
     try:
         # Build bed query with filters
         bed_query = """
@@ -1377,19 +1313,24 @@ def calculate_bed_occupancy(from_date, to_date, dept_name=None, location_filter=
         
         bed_conditions = []
         
-        # Department filter
+        # Department filter - map DEPTNAME to SPECIALITY in BEDMASTER
         if dept_name and dept_name not in (None, "", "All"):
+            # Option 1: Direct match if SPECIALITY stores department names
             bed_conditions.append(f"SPECIALITY = '{safe_sql(dept_name)}'")
+            
+            # Option 2: If you need to map DEPTCODE to SPECIALITY:
+            # try:
+            #     dept_code_q = f"SELECT DEPTCODE FROM DEPARTMENT WHERE DEPTNAME = '{safe_sql(dept_name)}' AND ROWNUM = 1"
+            #     dept_code_df = pd.read_sql(dept_code_q, conn)
+            #     if not dept_code_df.empty:
+            #         dept_code = dept_code_df['DEPTCODE'].iloc[0]
+            #         bed_conditions.append(f"DEPTCODE = '{safe_sql(dept_code)}'")
+            # except:
+            #     pass
         
         # Location filter
         if location_filter and location_filter not in (None, "", "All"):
             bed_conditions.append(f"LOCATION = '{safe_sql(location_filter)}'")
-        
-        # Hospital filter (if needed)
-        if selected_hospital not in (None, "", "All Hospitals"):
-            # Add hospital filter if BEDMASTER has HOSPITALID column
-            # bed_conditions.append(f"HOSPITALID = '{safe_sql(selected_hospital)}'")
-            pass
         
         if bed_conditions:
             bed_query += " AND " + " AND ".join(bed_conditions)
@@ -1399,6 +1340,8 @@ def calculate_bed_occupancy(from_date, to_date, dept_name=None, location_filter=
         
         if total_beds == 0:
             return 0.0, 0.0, 0, pd.DataFrame()
+        
+        # Rest of the function remains the same...
         
         # Build census query with matching logic
         # CENSUSDATA.SPECIALITY should match BEDMASTER.LOCATION
@@ -1524,9 +1467,23 @@ def get_location_occupancy_breakdown(from_date, to_date, dept_name=None):
         return pd.DataFrame()
     
 def load_inpatients(from_date, to_date, dept_name):
-    dept_filter = "1=1" if dept_name in (None, "", "All") else f"D.DEPTNAME = '{safe_sql(dept_name)}'"
+    # Build department filter
+    if dept_name in (None, "", "All"):
+        dept_filter = "1=1"
+    else:
+        # Get the department code for the selected department name
+        try:
+            dept_code_q = f"SELECT DEPTCODE FROM DEPARTMENT WHERE DEPTNAME = '{safe_sql(dept_name)}' AND ROWNUM = 1"
+            dept_code_df = pd.read_sql(dept_code_q, conn)
+            if not dept_code_df.empty:
+                dept_code = dept_code_df['DEPTCODE'].iloc[0]
+                dept_filter = f"I.DEPTCODE = '{safe_sql(dept_code)}'"
+            else:
+                dept_filter = "1=1"  # If dept not found, show all
+        except:
+            dept_filter = "1=1"
     
-    # Fixed hospital filter - use only I.HOSPITALID
+    # Hospital filter
     if selected_hospital in (None, "", "All Hospitals"):
         hosp_filter = "1=1"
     else:
@@ -1536,19 +1493,23 @@ def load_inpatients(from_date, to_date, dept_name):
         "SELECT I.INPATIENTID, I.MRN, I.DAYSCARED, I.ADMISSIONTYPE, I.DOA, P.DEATHDATE, I.DEPTCODE, I.HOSPITALID "
         "FROM INPATIENT I "
         "JOIN PATIENT P ON I.MRN = P.MRN "
-        "JOIN DEPARTMENT D ON I.DEPTCODE = D.DEPTCODE AND I.HOSPITALID = D.HOSPITALID "
         f"WHERE {dept_filter} AND {hosp_filter} "
         f"AND I.DOA BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD') AND TO_DATE('{to_date}', 'YYYY-MM-DD')"
     )
     try:
         return pd.read_sql(q, conn)
-    except Exception:
+    except Exception as e:
+        st.error(f"Error loading inpatients: {e}")
         return pd.DataFrame()
 
 def load_outpatients(from_date, to_date, dept_name):
-    dept_filter = "1=1" if dept_name in (None, "", "All") else f"D.DEPTNAME = '{safe_sql(dept_name)}'"
+    # Build department filter
+    if dept_name in (None, "", "All"):
+        dept_filter = "1=1"
+    else:
+        dept_filter = f"O.DEPTNAME = '{safe_sql(dept_name)}'"
     
-    # Fixed hospital filter - use only O.HOSPITALID
+    # Hospital filter
     if selected_hospital in (None, "", "All Hospitals"):
         hosp_filter = "1=1"
     else:
@@ -1557,13 +1518,13 @@ def load_outpatients(from_date, to_date, dept_name):
     q = (
         "SELECT O.OUTPATIENTID, O.MRN, O.DOV, O.DEPTNAME, O.HOSPITALID "
         "FROM OUTPATIENT O "
-        "JOIN DEPARTMENT D ON O.DEPTNAME = D.DEPTNAME AND O.HOSPITALID = D.HOSPITALID "
         f"WHERE {dept_filter} AND {hosp_filter} "
         f"AND O.DOV BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD') AND TO_DATE('{to_date}', 'YYYY-MM-DD')"
     )
     try:
         return pd.read_sql(q, conn)
-    except Exception:
+    except Exception as e:
+        st.error(f"Error loading outpatients: {e}")
         return pd.DataFrame()
 
 def compute_age_distribution():
@@ -1582,9 +1543,22 @@ def compute_age_distribution():
         return None, pd.DataFrame(columns=['AGE_GROUP','CNT'])
 
 def admission_type_breakdown(from_date, to_date, dept_name):
-    dept_filter = "1=1" if dept_name in (None, "", "All") else f"D.DEPTNAME = '{safe_sql(dept_name)}'"
+    # Build department filter
+    if dept_name in (None, "", "All"):
+        dept_filter = "1=1"
+    else:
+        try:
+            dept_code_q = f"SELECT DEPTCODE FROM DEPARTMENT WHERE DEPTNAME = '{safe_sql(dept_name)}' AND ROWNUM = 1"
+            dept_code_df = pd.read_sql(dept_code_q, conn)
+            if not dept_code_df.empty:
+                dept_code = dept_code_df['DEPTCODE'].iloc[0]
+                dept_filter = f"I.DEPTCODE = '{safe_sql(dept_code)}'"
+            else:
+                dept_filter = "1=1"
+        except:
+            dept_filter = "1=1"
     
-    # Fixed hospital filter
+    # Hospital filter
     if selected_hospital in (None, "", "All Hospitals"):
         hosp_filter = "1=1"
     else:
@@ -1592,7 +1566,7 @@ def admission_type_breakdown(from_date, to_date, dept_name):
     
     q = (
         "SELECT NVL(ADMISSIONTYPE,'UNKNOWN') AS ADMISSIONTYPE, COUNT(*) AS CNT "
-        "FROM INPATIENT I JOIN DEPARTMENT D ON I.DEPTCODE = D.DEPTCODE AND I.HOSPITALID = D.HOSPITALID "
+        "FROM INPATIENT I "
         f"WHERE {dept_filter} AND {hosp_filter} "
         f"AND I.DOA BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD') AND TO_DATE('{to_date}', 'YYYY-MM-DD') "
         "GROUP BY NVL(ADMISSIONTYPE,'UNKNOWN') ORDER BY CNT DESC"
@@ -2932,15 +2906,42 @@ with occ_tab1:
 
     # # ---- Surgery Details tab – FIXED WITH STAFFID FALLBACK ----
 # ---- Surgery Details tab – COMPLETE WITH ALL STAFF ROLES ----
+# ---- Surgery Details tab – FIXED WITH DEPARTMENT FILTER ----
 with tabs[7]:
     st.header("Surgery Details")
 
+    # ============================================
+    # BUILD DEPARTMENT FILTER USING DEPTCODE
+    # ============================================
+    dept_filter = ""
+    if selected_dept and selected_dept not in (None, "", "All"):
+        try:
+            # Get DEPTCODE for selected department name
+            dept_code_q = f"SELECT DEPTCODE FROM DEPARTMENT WHERE DEPTNAME = '{safe_sql(selected_dept)}' AND ROWNUM = 1"
+            dept_code_df = pd.read_sql(dept_code_q, conn)
+            
+            if not dept_code_df.empty and dept_code_df['DEPTCODE'].iloc[0] is not None:
+                dept_code = dept_code_df['DEPTCODE'].iloc[0]
+                dept_filter = f"AND s.DEPTCODE = '{safe_sql(dept_code)}'"
+                st.info(f"🏥 Filtering for Department: {selected_dept} (Code: {dept_code})")
+            else:
+                st.warning(f"⚠️ Department '{selected_dept}' not found in DEPARTMENT table")
+                dept_filter = "AND 1=0"  # Return no results if dept not found
+        except Exception as e:
+            st.error(f"Error getting department code: {e}")
+            dept_filter = ""
+    
     # Build surgeon filter (if any)
     surgeon_filter = ""
     if selected_surgeon_id:
         surgeon_filter = f"AND EXISTS (SELECT 1 FROM SURGERY_PERSONNEL sp WHERE sp.SURGERYID = s.SURGERYID AND sp.STAFFROLE = 'SURGEON' AND sp.STAFFID = '{safe_sql(selected_surgeon_id)}')"
+        st.info(f"👨‍⚕️ Filtering for Surgeon: {selected_surgeon_name}")
 
-    # COMPLETE QUERY: All 16+ staff roles with STAFFID fallback
+    # Hospital filter
+    if selected_hospital not in (None, "", "All Hospitals"):
+        st.info(f"🏥 Filtering for Hospital: {selected_hospital}")
+
+    # COMPLETE QUERY with DEPTCODE filter
     surgery_q = f"""
     WITH RankedPersonnel AS (
         SELECT 
@@ -2960,6 +2961,8 @@ with tabs[7]:
         s.OTNUMBER,
         s.ANAESTHESIA,
         s.SURGERYTYPE,
+        s.DEPTCODE,
+        NVL(d.DEPTNAME, s.DEPTCODE) AS DEPTNAME,
         NVL(sd.SURGERYNAME, 'Procedure Name Not Found') AS PROCEDURE_NAME,
         NVL(sd.CATEGORY, 'Uncategorized') AS PROC_CATEGORY,
         NVL(sd.SUBCATEGORY, '-') AS PROC_SUBCATEGORY,
@@ -2982,6 +2985,7 @@ with tabs[7]:
         NVL(asstnurse.STAFFNAME, '-') AS ASSTNURSE_NAME,
         NVL(wardnurse.STAFFNAME, '-') AS WARDNURSE_NAME
     FROM SURGERY s
+    LEFT JOIN DEPARTMENT d ON s.DEPTCODE = d.DEPTCODE AND s.HOSPITALID = d.HOSPITALID
     LEFT JOIN SURGERY_DETAILS sd 
       ON s.SURGERYID = sd.SURGERYID
      AND s.HOSPITALID = sd.HOSPITALID
@@ -3006,6 +3010,7 @@ with tabs[7]:
     WHERE s.SURGERYDATE BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD')
                            AND TO_DATE('{to_date}', 'YYYY-MM-DD') + 0.99999
       AND (s.HOSPITALID = '{safe_sql(selected_hospital)}' OR '{selected_hospital}' = 'All Hospitals')
+      {dept_filter}
       {surgeon_filter}
     ORDER BY s.SURGERYDATE DESC
     """
@@ -3013,18 +3018,36 @@ with tabs[7]:
     try:
         df = pd.read_sql(surgery_q, conn)
     except Exception as e:
-        st.error(f"Query failed: {e}")
-        with st.expander("Show SQL Query"):
-            st.code(surgery_q)
+        st.error(f"❌ Query failed: {e}")
+        with st.expander("🔍 Show SQL Query for Debugging"):
+            st.code(surgery_q, language="sql")
         df = pd.DataFrame()
 
     if df.empty:
-        st.warning("No surgeries found for the selected filters.")
+        st.warning("⚠️ No surgeries found for the selected filters.")
+        
+        # Show applied filters for debugging
+        with st.expander("🔍 Applied Filters"):
+            st.code(f"""
+Date Range: {from_date} to {to_date}
+Department: {selected_dept}
+Hospital: {selected_hospital}
+Surgeon: {selected_surgeon_name if selected_surgeon_id else 'All Surgeons'}
+
+Query Filters Applied:
+- Date Filter: ✅
+- Hospital Filter: {'✅ ' + selected_hospital if selected_hospital != 'All Hospitals' else '❌ (All Hospitals)'}
+- Department Filter: {'✅ ' + selected_dept if selected_dept != 'All' else '❌ (All Departments)'}
+- Surgeon Filter: {'✅ ' + (selected_surgeon_name or '') if selected_surgeon_id else '❌ (All Surgeons)'}
+            """)
         st.stop()
 
     total_surgeries = len(df)
     days = (to_date - from_date).days + 1
     daily_avg = round(total_surgeries / days, 1)
+
+    # Display filter summary
+    st.success(f"✅ Found {total_surgeries:,} surgeries matching your filters")
 
     # KPIs
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -3039,6 +3062,21 @@ with tabs[7]:
     with c5:
         active_surgeons = df[df["SURGEON_NAME"] != "Unknown Surgeon"]["SURGEON_NAME"].nunique()
         st.markdown(kpi_card_html("Active Surgeons", active_surgeons, "Performed at least 1 surgery", "kpi-grad-5", "👨‍⚕️"), unsafe_allow_html=True)
+
+    # Show department breakdown if "All" is selected
+    if selected_dept in (None, "", "All"):
+        dept_breakdown = df.groupby('DEPTNAME').size().reset_index(name='Count')
+        dept_breakdown = dept_breakdown.sort_values('Count', ascending=False)
+        
+        with st.expander("🏥 View Breakdown by Department"):
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                st.dataframe(dept_breakdown.style.format({"Count": "{:,}"}), use_container_width=True)
+            with col2:
+                st.metric("Total Departments", len(dept_breakdown))
+                if not dept_breakdown.empty:
+                    top_dept = dept_breakdown.iloc[0]
+                    st.metric("Top Department", top_dept['DEPTNAME'], f"{top_dept['Count']:,} surgeries")
 
     st.markdown("---")
 
@@ -3170,43 +3208,10 @@ with tabs[7]:
 
     st.markdown("---")
 
-    # # === 4. CATEGORY & SUBCATEGORY BREAKDOWN ===
-    # st.subheader("📂 Procedure Categories")
-    
-    # tab_cat, tab_subcat = st.tabs(["📊 By Category", "📋 By Subcategory"])
-    
-    # with tab_cat:
-    #     cat_count = df["PROC_CATEGORY"].value_counts().reset_index()
-    #     cat_count.columns = ["Category", "Count"]
-        
-    #     st.altair_chart(
-    #         alt.Chart(cat_count).mark_bar(color="#9b59b6").encode(
-    #             y=alt.Y("Category:N", sort="-x"),
-    #             x="Count:Q",
-    #             tooltip=["Category", "Count"]
-    #         ).properties(height=400), use_container_width=True
-    #     )
-    #     st.dataframe(cat_count.style.format({"Count": "{:,}"}), use_container_width=True)
-    
-    # with tab_subcat:
-    #     subcat_count = df["PROC_SUBCATEGORY"].value_counts().head(20).reset_index()
-    #     subcat_count.columns = ["Subcategory", "Count"]
-        
-    #     st.altair_chart(
-    #         alt.Chart(subcat_count).mark_bar(color="#e67e22").encode(
-    #             y=alt.Y("Subcategory:N", sort="-x"),
-    #             x="Count:Q",
-    #             tooltip=["Subcategory", "Count"]
-    #         ).properties(height=500), use_container_width=True
-    #     )
-    #     st.dataframe(subcat_count.style.format({"Count": "{:,}"}), use_container_width=True)
-
-    # st.markdown("---")
-
     # === 5. FULL SURGERY REGISTER ===
     with st.expander("📄 View Full Surgery Register (All Details)", expanded=False):
         reg = df[[
-            "SURGERYDATE", "MRN", "PROCEDURE_NAME", "PROC_CATEGORY", "PROC_SUBCATEGORY",
+            "SURGERYDATE", "MRN", "DEPTNAME", "PROCEDURE_NAME", "PROC_CATEGORY", "PROC_SUBCATEGORY",
             "SURGEON_NAME", "ANAESTHETIST_NAME", "ASST_SURGEON_NAME", "ASST_ANAESTHETIST_NAME",
             "PERFUSIONIST_NAME", "RNURSE_NAME", "SCNURSE_NAME", "NURSE_NAME", 
             "OTNUMBER", "ANAESTHESIA"
@@ -3216,6 +3221,7 @@ with tabs[7]:
         reg.rename(columns={
             "SURGERYDATE": "Date",
             "MRN": "Patient",
+            "DEPTNAME": "Department",
             "PROCEDURE_NAME": "Procedure",
             "PROC_CATEGORY": "Category",
             "PROC_SUBCATEGORY": "Subcategory",

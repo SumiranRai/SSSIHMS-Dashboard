@@ -3,6 +3,8 @@ import oracledb
 import hashlib
 import base64
 from pathlib import Path
+import os
+from dotenv import load_dotenv
 
 # Page config
 st.set_page_config(
@@ -11,16 +13,19 @@ st.set_page_config(
     layout="centered"
 )
 
-# Oracle client init
-oracledb.init_oracle_client(
-    lib_dir=r"C:\Users\sumir\Downloads\instantclient-basic-windows.x64-23.9.0.25.07\instantclient_23_9"
-)
+# Load environment variables
+load_dotenv()
+
+# Oracle client init from .env
+oracle_client_path = os.getenv("ORACLE_CLIENT_PATH")
+if oracle_client_path:
+    oracledb.init_oracle_client(lib_dir=oracle_client_path)
 
 def get_connection():
     return oracledb.connect(
-        user="hisapp",
-        password="his@2025",
-        dsn="192.168.21.6:1521/hisdb"
+        user=os.getenv("DB_USER", "hisapp"),
+        password=os.getenv("DB_PASSWORD", "his@2025"),
+        dsn=os.getenv("DB_DSN", "192.168.21.6:1521/hisdb")
     )
 
 def hash_password(password):
@@ -104,6 +109,7 @@ st.markdown("""
     /* Outer container - More Compact */
     .login-outer-container {
         background: rgba(26, 32, 46, 0.85);
+        padding-top: 40px !important; 
         backdrop-filter: blur(20px);
         padding: 1.5rem 2.5rem 1.8rem 2.5rem;
         border-radius: 20px;
@@ -114,20 +120,35 @@ st.markdown("""
     }
     
     /* Logo container - Smaller */
-    .logo-container {
-        background: white;
-        padding: 0.7rem;
-        border-radius: 10px;
-        display: inline-block;
-        margin-bottom: 1rem;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-    }
-    
-    .logo-img {
-        max-width: 80px;
-        height: auto;
-        display: block;
-    }
+     /* Logo container - smaller + nudged upward (strong overrides) */
+.logo-container {
+    background: white !important;
+    padding: 0.35rem !important;            /* smaller padding */
+    border-radius: 8px !important;
+    display: inline-block !important;
+    margin-bottom: 0.45rem !important;      /* small space below */
+    margin-top: -1px !important;
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.15) !important;
+    transform: scale(0.78) !important;      /* scale down */
+    position: relative !important;
+    top: -14px !important;                  /* move upward */
+    z-index: 5 !important;
+}
+
+/* Make the image smaller */
+.logo-img {
+    max-width: 300px !important;             /* very small logo */
+    height: auto !important;
+    display: block !important;
+}
+
+/* Slightly tighten header spacing so logo sits closer to the form */
+.login-header {
+    margin-bottom: 0.6rem !important;
+    padding-top: 0.2rem !important;
+}
+
+
     
     .hospital-icon {
         font-size: 3rem;
@@ -286,9 +307,11 @@ st.markdown(f"""
         <div class='divider'></div>
 """, unsafe_allow_html=True)
 
-username = st.text_input("👤 Staff ID", placeholder="Enter staff ID", key="username_input")
-password = st.text_input("🔒 Password", type="password", placeholder="Enter password", key="password_input")
-login_button = st.button("Login", use_container_width=True)
+# Login form (ENTER will trigger the submit automatically)
+with st.form("login_form", clear_on_submit=False):
+    username = st.text_input("👤 Staff ID", placeholder="Enter staff ID", key="username_input")
+    password = st.text_input("🔒 Password", type="password", placeholder="Enter password", key="password_input")
+    login_button = st.form_submit_button("Login", use_container_width=True)
 
 # Login logic
 if login_button:
@@ -307,13 +330,17 @@ if login_button:
                 st.session_state.staffname = result["staffname"]
                 st.session_state.role = result["role"]
                 st.session_state.hospitalid = result["hospitalid"]
+
                 if result["role"] == "admin":
                     st.success(f"🛠️ Admin Access - Welcome {result['staffname']}!")
                 else:
                     st.success(f"✅ Welcome back, {result['staffname']}!")
+
                 if result["hospitalid"]:
                     st.markdown(f"<div class='info-badge'>🏥 Hospital: {result['hospitalid']}</div>", unsafe_allow_html=True)
+
                 st.switch_page("pages/dashboard.py")
+
 
 st.markdown("""
         <div class='footer-text'>
