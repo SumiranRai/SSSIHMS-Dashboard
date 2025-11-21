@@ -392,20 +392,37 @@ st.subheader("🗑️ Delete Staff")
 with st.expander("⚠️ Delete Staff Member", expanded=False):
     del_staff = st.selectbox("Select staff to delete", [""] + staff_list, key="del_select")
     
+    # Check if trying to delete self
+    is_self_delete = del_staff == st.session_state.username
+    
     if del_staff:
         staff_to_delete = df[df["STAFFID"] == del_staff].iloc[0]
-        st.warning(f"""
-        ⚠️ **You are about to delete:**  
-        **ID:** {staff_to_delete['STAFFID']}  
-        **Name:** {staff_to_delete['STAFFNAME']}  
-        **Role:** {staff_to_delete['ACCESS_ROLE']}
-        """)
+        
+        if is_self_delete:
+            st.error(f"""
+            🚫 **You cannot delete your own account!**  
+            **ID:** {staff_to_delete['STAFFID']}  
+            **Name:** {staff_to_delete['STAFFNAME']}  
+            **Role:** {staff_to_delete['ACCESS_ROLE']}
+            
+            Please ask another administrator to delete your account if needed.
+            """)
+        else:
+            st.warning(f"""
+            ⚠️ **You are about to delete:**  
+            **ID:** {staff_to_delete['STAFFID']}  
+            **Name:** {staff_to_delete['STAFFNAME']}  
+            **Role:** {staff_to_delete['ACCESS_ROLE']}
+            """)
     
     confirm = st.checkbox("⚠️ I understand this will permanently delete the staff record.", key="del_confirm")
 
-    if st.button("🗑️ Delete Staff", use_container_width=True, type="primary"):
+    # Disable delete button if trying to delete self
+    if st.button("🗑️ Delete Staff", use_container_width=True, type="primary", disabled=is_self_delete):
         if not del_staff:
             st.error("❌ Select a staff ID first.")
+        elif is_self_delete:
+            st.error("🚫 You cannot delete your own account!")
         elif not confirm:
             st.error("❌ Please confirm deletion by checking the box above.")
         else:
