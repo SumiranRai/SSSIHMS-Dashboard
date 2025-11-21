@@ -1,0 +1,10 @@
+python-dotenv>=1.0.0
+xlsxwriter>=3.1.0
+openpyxl>=3.1.0
+# dotenv
+# reportlab
+# oracledb
+# streamlit
+# x64
+# c++
+# matplotlib

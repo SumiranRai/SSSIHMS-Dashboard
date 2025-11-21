@@ -1,590 +1,28 @@
 # pages/dashboard.py
 """
-Hospital Dashboard - COMPLETE file with all updates.
-
-Features:
-- Wide layout
-- Tabs: General KPIs, Operational Efficiency, Financial, Quality & Safety, Surgery Details, Reports, Stats
-- Sidebar: Date range, Department, Hospital, Ordering Dept, Radiology modality, Doctor
-- Sidebar action buttons: Logout, Change Password, Admin Panel
-- Default to user's hospital ID (from STAFFMASTER.HOSPITALID via session state)
-- Default date range: current month (first day to today)
-- Auto-load on first visit, then require "Load Data" button for filter changes
-- Date range: 2000 to current year
+Hospital Dashboard
 """
-
 import streamlit as st
 import pandas as pd
 import oracledb
 import altair as alt
 import io
 import zipfile
-from datetime import date, datetime, timedelta
 import streamlit.components.v1 as components
 import json
 import os
+
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from dotenv import load_dotenv
-# ────────────────────── ADD THIS BLOCK ──────────────────────
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.units import inch
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_RIGHT
-# ───────────────────────────────────────────────────────────
 
-# ========================================
-# CUSTOM METRICS MANAGER - EMBEDDED
-# ========================================
-# ========================================
-# CUSTOM METRICS MANAGER - COMPLETE FIXED VERSION
-# ========================================
-
-class CustomMetricsManager:
-    def __init__(self, config_dir="custom_metrics"):
-        """Initialize the custom metrics manager"""
-        self.config_dir = Path(config_dir)
-        self.config_dir.mkdir(exist_ok=True)
-        self.metrics_file = self.config_dir / "saved_metrics.json"
-        self.templates_dir = self.config_dir / "templates"
-        self.templates_dir.mkdir(exist_ok=True)
-        
-    def parse_metric_file(self, file_content):
-        """Parse a metric definition file"""
-        lines = file_content.strip().split('\n')
-        metric_def = {
-            'name': '',
-            'icon': '📊',
-            'color': 'kpi-grad-1',
-            'description': '',
-            'query': '',
-            'type': 'single_value',  # NEW: default type
-            'created_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        }
-        
-        query_started = False
-        query_lines = []
-        
-        for line in lines:
-            line = line.strip()
-            
-            if query_started:
-                query_lines.append(line)
-            elif line.startswith('METRIC_NAME:'):
-                metric_def['name'] = line.split('METRIC_NAME:', 1)[1].strip()
-            elif line.startswith('METRIC_ICON:'):
-                metric_def['icon'] = line.split('METRIC_ICON:', 1)[1].strip()
-            elif line.startswith('METRIC_COLOR:'):
-                metric_def['color'] = line.split('METRIC_COLOR:', 1)[1].strip()
-            elif line.startswith('METRIC_TYPE:'):  # NEW: optional type specification
-                metric_def['type'] = line.split('METRIC_TYPE:', 1)[1].strip().lower()
-            elif line.startswith('DESCRIPTION:'):
-                metric_def['description'] = line.split('DESCRIPTION:', 1)[1].strip()
-            elif line.startswith('QUERY:'):
-                query_started = True
-        
-        metric_def['query'] = '\n'.join(query_lines).strip()
-        
-        if not metric_def['name']:
-            raise ValueError("METRIC_NAME is required")
-        if not metric_def['query']:
-            raise ValueError("QUERY is required")
-            
-        return metric_def
-    
-    def save_metric(self, metric_def):
-        """Save a metric definition to persistent storage"""
-        metrics = self.load_saved_metrics()
-        metric_id = metric_def['name'].lower().replace(' ', '_')
-        metrics[metric_id] = metric_def
-        
-        with open(self.metrics_file, 'w') as f:
-            json.dump(metrics, f, indent=2)
-        
-        return metric_id
-    
-    def load_saved_metrics(self):
-        """Load all saved metrics from storage"""
-        if not self.metrics_file.exists():
-            return {}
-        
-        try:
-            with open(self.metrics_file, 'r') as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    
-    def delete_metric(self, metric_id):
-        """Delete a saved metric"""
-        metrics = self.load_saved_metrics()
-        if metric_id in metrics:
-            del metrics[metric_id]
-            with open(self.metrics_file, 'w') as f:
-                json.dump(metrics, f, indent=2)
-            return True
-        return False
-    
-    def execute_metric_query(self, query, conn, from_date=None, to_date=None, 
-                            selected_hospital=None, selected_dept=None):
-        """
-        FIXED: Execute a metric query with parameter substitution
-        Now supports both single values and tables
-        """
-        if from_date:
-            query = query.replace('{from_date}', str(from_date))
-        if to_date:
-            query = query.replace('{to_date}', str(to_date))
-        if selected_hospital:
-            query = query.replace('{hospital}', str(selected_hospital))
-        if selected_dept:
-            query = query.replace('{dept}', str(selected_dept))
-        
-        try:
-            result = pd.read_sql(query, conn)
-            
-            # FIXED: Check if this is a table result (multiple rows or columns)
-            if len(result) > 1 or len(result.columns) > 1:
-                return result  # Return DataFrame for tables
-            
-            # Single value result
-            if 'VALUE' in result.columns:
-                return result['VALUE'].iloc[0]
-            else:
-                return result.iloc[0, 0]
-        except Exception as e:
-            raise Exception(f"Query execution failed: {str(e)}")
-    
-    def create_sample_template(self):
-        """FIXED: Create a sample metric template file with both types"""
-        sample = """METRIC_NAME: Total Active Patients
-METRIC_ICON: 👥
-METRIC_COLOR: kpi-grad-1
-METRIC_TYPE: single_value
-DESCRIPTION: Count of all active patients in the system
-QUERY:
-SELECT COUNT(*) as VALUE
-FROM PATIENT
-WHERE STATUS = 'A'
-
----
-
-Example for TABLE metric:
-
-METRIC_NAME: Top Departments by Patient Count
-METRIC_ICON: 🏥
-METRIC_COLOR: kpi-grad-2
-METRIC_TYPE: table
-DESCRIPTION: Shows patient distribution across departments
-QUERY:
-SELECT 
-    DEPTNAME as Department,
-    COUNT(*) as Patient_Count,
-    ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 2) as Percentage
-FROM INPATIENT i
-JOIN DEPARTMENT d ON i.DEPTCODE = d.DEPTCODE
-WHERE i.DOA BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD') 
-                AND TO_DATE('{to_date}', 'YYYY-MM-DD')
-GROUP BY DEPTNAME
-ORDER BY Patient_Count DESC
-FETCH FIRST 10 ROWS ONLY
-"""
-        template_file = self.templates_dir / "sample_metric.txt"
-        with open(template_file, 'w') as f:
-            f.write(sample)
-        return template_file
-
-
-# ========================================
-# RENDER FUNCTION - FIXED FOR PERMISSIONS
-# ========================================
-
-def render_custom_metrics_ui(conn, from_date, to_date, selected_hospital, selected_dept):
-    """
-    FIXED: Render the custom metrics UI in Streamlit
-    Now supports role-based access:
-    - Admins: Can view, add, and manage metrics
-    - Users: Can only view metrics
-    """
-    #st.header("🎯 Custom Metrics Manager")
-   
-    manager = CustomMetricsManager()
-    is_admin = st.session_state.get("role") == "admin"
-   
-    # FIXED: Show different tabs based on role
-    if is_admin:
-        tab1, tab2, tab3 = st.tabs(["📊 View Metrics", "➕ Add New Metric", "⚙️ Manage Metrics"])
-    else:
-        # Non-admin users only see View Metrics - create a single tab list
-        tabs_list = st.tabs(["📊 View Metrics"])
-        tab1 = tabs_list[0]
-   
-    # ============================================
-    # TAB 1: VIEW METRICS (Available to all users)
-    # ============================================
-    
-    # ============================================
-# TAB 1: VIEW METRICS (Available to all users)
-# ============================================
-    with tab1:
-        # Show info for non-admin users
-        if not is_admin:
-            st.info("💡 Only administrators can add or manage custom metrics. Contact your admin to create new metrics.")
-    
-        st.subheader("Active Custom Metrics")
-    
-        saved_metrics = manager.load_saved_metrics()
-    
-        if not saved_metrics:
-            if is_admin:
-                st.info("📭 No custom metrics saved yet. Go to 'Add New Metric' tab to create one!")
-            else:
-                st.info("📭 No custom metrics available yet. Ask an administrator to create metrics.")
-        else:
-            # FIXED: Add a "Refresh Metrics" button to control when queries execute
-            if st.button("🔄 Refresh All Metrics", key="refresh_metrics_btn", type="primary"):
-                st.session_state.metrics_refreshed = True
-            
-            if st.session_state.get("metrics_refreshed", False):
-                metrics_per_row = 3
-                metric_items = list(saved_metrics.items())
-            
-                for i in range(0, len(metric_items), metrics_per_row):
-                    cols = st.columns(metrics_per_row)
-                
-                    for j in range(metrics_per_row):
-                        idx = i + j
-                        if idx >= len(metric_items):
-                            break
-                    
-                        metric_id, metric_def = metric_items[idx]
-                    
-                        with cols[j]:
-                            with st.container():
-                                st.markdown(f"### {metric_def['icon']} {metric_def['name']}")
-                            
-                                try:
-                                    # Show loading spinner for each metric
-                                    with st.spinner(f"Loading {metric_def['name']}..."):
-                                        result = manager.execute_metric_query(
-                                            metric_def['query'],
-                                            conn,
-                                            from_date=from_date,
-                                            to_date=to_date,
-                                            selected_hospital=selected_hospital,
-                                            selected_dept=selected_dept
-                                        )
-                                
-                                    # Check if result is a DataFrame (table) or single value
-                                    if isinstance(result, pd.DataFrame):
-                                        st.caption(metric_def['description'])
-                                        st.dataframe(result, use_container_width=True, height=300)
-                                        st.caption(f"📊 {len(result)} rows returned")
-                                    else:
-                                        # Single value
-                                        if isinstance(result, (int, float)):
-                                            if isinstance(result, float):
-                                                display_value = f"{result:,.2f}"
-                                            else:
-                                                display_value = f"{result:,}"
-                                        else:
-                                            display_value = str(result)
-                                    
-                                        st.metric(label=metric_def['name'], value=display_value)
-                                        st.caption(metric_def['description'])
-                                
-                                except Exception as e:
-                                    st.error(f"Error: {str(e)}")
-                                    st.caption(metric_def['description'])
-            else:
-                st.info("👆 Click 'Refresh All Metrics' button above to load custom metrics data.")
-                st.write(f"**{len(saved_metrics)} custom metrics** available")
-   
-    # ============================================
-    # TAB 2 & 3: ADD NEW METRIC & MANAGE (Admin only)
-    # ============================================
-    if is_admin:
-        with tab2:
-            st.subheader("➕ Create New Custom Metric")
-           
-            st.info("""
-            📝 **How to create a metric:**
-            1. Upload a text file with metric definition, OR
-            2. Use the form below to create one
-           
-            **Metric Types:**
-            - **Single Value**: Returns one number (e.g., COUNT, SUM, AVG)
-            - **Table**: Returns multiple rows of data
-           
-            **Supported placeholders in queries:**
-            - `{from_date}` - Start date from filters
-            - `{to_date}` - End date from filters
-            - `{hospital}` - Selected hospital
-            - `{dept}` - Selected department
-            """)
-           
-            st.markdown("#### Option 1: Upload Metric File")
-            uploaded_file = st.file_uploader("Upload metric definition (.txt)", type=['txt'], key="metric_upload")
-           
-            if uploaded_file:
-                try:
-                    file_content = uploaded_file.read().decode('utf-8')
-                    metric_def = manager.parse_metric_file(file_content)
-                   
-                    st.success(f"✅ Parsed metric: **{metric_def['name']}**")
-                    st.json(metric_def)
-                   
-                    if st.button("💾 Save This Metric", key="save_uploaded"):
-                        metric_id = manager.save_metric(metric_def)
-                        st.success(f"✅ Metric saved with ID: {metric_id}")
-                        st.balloons()
-                        st.rerun()
-                       
-                except Exception as e:
-                    st.error(f"❌ Error parsing file: {str(e)}")
-           
-            st.markdown("---")
-            st.markdown("#### Option 2: Create Using Form")
-           
-            with st.form("new_metric_form"):
-                metric_name = st.text_input("Metric Name*", placeholder="e.g., Total Revenue")
-               
-                col1, col2 = st.columns(2)
-                with col1:
-                    metric_icon = st.text_input("Icon (emoji)", value="📊")
-                with col2:
-                    color_options = ["kpi-grad-1", "kpi-grad-2", "kpi-grad-3", "kpi-grad-4",
-                                    "kpi-grad-5", "kpi-grad-6", "kpi-grad-7", "kpi-grad-8"]
-                    metric_color = st.selectbox("Color Theme", color_options)
-               
-                metric_type = st.radio(
-                    "Metric Type*",
-                    options=["Single Value", "Table"],
-                    help="Single Value: Shows one number. Table: Shows multiple rows of data."
-                )
-               
-                metric_desc = st.text_area("Description", placeholder="What does this metric measure?")
-               
-                if metric_type == "Single Value":
-                    query_placeholder = """SELECT COUNT(*) as VALUE
-FROM YOUR_TABLE
-WHERE DATE_COLUMN BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD')
-                       AND TO_DATE('{to_date}', 'YYYY-MM-DD')"""
-                    query_help = "Query must return a single value. Use column name 'VALUE' or it will use first column."
-                else:
-                    query_placeholder = """SELECT
-    COLUMN1,
-    COLUMN2,
-    COUNT(*) as COUNT
-FROM YOUR_TABLE
-WHERE DATE_COLUMN BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD')
-                       AND TO_DATE('{to_date}', 'YYYY-MM-DD')
-GROUP BY COLUMN1, COLUMN2
-ORDER BY COUNT DESC"""
-                    query_help = "Query can return multiple rows and columns. Results will be displayed as a table."
-               
-                metric_query = st.text_area(
-                    "SQL Query*",
-                    placeholder=query_placeholder,
-                    height=200
-                )
-               
-                st.caption(f"⚠️ {query_help}")
-               
-                submitted = st.form_submit_button("💾 Save Metric")
-               
-                if submitted:
-                    if not metric_name or not metric_query:
-                        st.error("❌ Metric Name and Query are required!")
-                    else:
-                        metric_def = {
-                            'name': metric_name,
-                            'icon': metric_icon,
-                            'color': metric_color,
-                            'description': metric_desc,
-                            'query': metric_query,
-                            'type': metric_type.lower().replace(" ", "_"),
-                            'created_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        }
-                       
-                        try:
-                            metric_id = manager.save_metric(metric_def)
-                            st.success(f"✅ Metric '{metric_name}' saved successfully!")
-                            st.balloons()
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"❌ Error saving metric: {str(e)}")
-           
-            st.markdown("---")
-            st.markdown("#### 📥 Download Sample Template")
-            if st.button("Download Sample Metric Template"):
-                template_file = manager.create_sample_template()
-                with open(template_file, 'r') as f:
-                    st.download_button(
-                        label="📄 Download sample_metric.txt",
-                        data=f.read(),
-                        file_name="sample_metric.txt",
-                        mime="text/plain"
-                    )
-       
-        # ============================================
-        # TAB 3: MANAGE METRICS (Admin only)
-        # ============================================
-        with tab3:
-            st.subheader("⚙️ Manage Saved Metrics")
-           
-            saved_metrics = manager.load_saved_metrics()
-           
-            if not saved_metrics:
-                st.info("No metrics to manage.")
-            else:
-                for metric_id, metric_def in saved_metrics.items():
-                    with st.expander(f"{metric_def['icon']} {metric_def['name']}", expanded=False):
-                        st.markdown(f"**ID:** `{metric_id}`")
-                        st.markdown(f"**Type:** {metric_def.get('type', 'single_value').replace('_', ' ').title()}")
-                        st.markdown(f"**Description:** {metric_def['description']}")
-                        st.markdown(f"**Created:** {metric_def.get('created_date', 'N/A')}")
-                       
-                        st.code(metric_def['query'], language='sql')
-                       
-                        col1, col2, col3 = st.columns(3)
-                       
-                        with col1:
-                            if st.button("🧪 Test Query", key=f"test_{metric_id}"):
-                                try:
-                                    result = manager.execute_metric_query(
-                                        metric_def['query'],
-                                        conn,
-                                        from_date=from_date,
-                                        to_date=to_date,
-                                        selected_hospital=selected_hospital,
-                                        selected_dept=selected_dept
-                                    )
-                                   
-                                    if isinstance(result, pd.DataFrame):
-                                        st.success(f"✅ Table Result: {len(result)} rows")
-                                        st.dataframe(result)
-                                    else:
-                                        st.success(f"✅ Result: **{result}**")
-                                except Exception as e:
-                                    st.error(f"❌ Query failed: {str(e)}")
-                       
-                        with col2:
-                            file_content = f"""METRIC_NAME: {metric_def['name']}
-METRIC_ICON: {metric_def['icon']}
-METRIC_COLOR: {metric_def['color']}
-METRIC_TYPE: {metric_def.get('type', 'single_value')}
-DESCRIPTION: {metric_def['description']}
-QUERY:
-{metric_def['query']}
-"""
-                            st.download_button(
-                                label="📥 Download",
-                                data=file_content,
-                                file_name=f"{metric_id}.txt",
-                                mime="text/plain",
-                                key=f"download_{metric_id}"
-                            )
-                       
-                        with col3:
-                            if st.button("🗑️ Delete", key=f"delete_{metric_id}", type="secondary"):
-                                if manager.delete_metric(metric_id):
-                                    st.success(f"✅ Deleted {metric_def['name']}")
-                                    st.rerun()
-                                else:
-                                    st.error("❌ Failed to delete")
-
-
-# ========================================
-# DISPLAY FUNCTION - FIXED FOR TABLES
-# ========================================
-
-def display_custom_metrics_row(conn, from_date, to_date, selected_hospital, selected_dept, kpi_card_html):
-    """
-    FIXED: Display custom metrics in a row
-    Now supports both single values and tables
-    """
-    manager = CustomMetricsManager()
-    saved_metrics = manager.load_saved_metrics()
-    
-    if saved_metrics:
-        st.markdown("---")
-        st.subheader("🎯 Custom Metrics")
-        
-        metrics_per_row = 4
-        metric_items = list(saved_metrics.items())
-        
-        for i in range(0, len(metric_items), metrics_per_row):
-            cols = st.columns(metrics_per_row)
-            
-            for j in range(metrics_per_row):
-                idx = i + j
-                if idx >= len(metric_items):
-                    break
-                
-                metric_id, metric_def = metric_items[idx]
-                
-                with cols[j]:
-                    try:
-                        result = manager.execute_metric_query(
-                            metric_def['query'],
-                            conn,
-                            from_date=from_date,
-                            to_date=to_date,
-                            selected_hospital=selected_hospital,
-                            selected_dept=selected_dept
-                        )
-                        
-                        # FIXED: Check if result is a DataFrame (table)
-                        if isinstance(result, pd.DataFrame):
-                            # For tables, show row count as the metric
-                            display_value = f"{len(result)} rows"
-                            st.markdown(
-                                kpi_card_html(
-                                    metric_def['name'],
-                                    display_value,
-                                    f"📊 {metric_def['description'][:30]}...",
-                                    metric_def['color'],
-                                    metric_def['icon']
-                                ),
-                                unsafe_allow_html=True
-                            )
-                            with st.expander("View Details"):
-                                st.dataframe(result, use_container_width=True)
-                        else:
-                            # Single value
-                            if isinstance(result, (int, float)):
-                                if isinstance(result, float):
-                                    display_value = f"{result:,.2f}"
-                                else:
-                                    display_value = f"{result:,}"
-                            else:
-                                display_value = str(result)
-                            
-                            st.markdown(
-                                kpi_card_html(
-                                    metric_def['name'],
-                                    display_value,
-                                    metric_def['description'],
-                                    metric_def['color'],
-                                    metric_def['icon']
-                                ),
-                                unsafe_allow_html=True
-                            )
-                        
-                    except Exception as e:
-                        st.markdown(
-                            kpi_card_html(
-                                metric_def['name'],
-                                "Error",
-                                str(e)[:50],
-                                "kpi-grad-5",
-                                "⚠️"
-                            ),
-                            unsafe_allow_html=True
-                        )
-# Add this function near the top of your dashboard.py file (after imports, before page config)
-
+# CSS 
 def inject_modern_css():
     """Inject modern, professional CSS styling"""
     st.markdown("""
@@ -781,9 +219,6 @@ def kpi_card_html(title, value, subtext, grad_class="kpi-grad-1", icon="📊"):
 st.set_page_config(page_title="🏥 SSSIHMS Hospital Dashboard", page_icon="🏥", layout="wide")
 
 inject_modern_css()
-# Add this function after your inject_modern_css() function in dashboard.py
-
-# Replace the inject_navbar() function and add new sidebar navigation
 
 # def inject_navbar():
 #     """Inject navigation bar at the top of the dashboard (accounting for Streamlit's top bar)"""
@@ -902,9 +337,6 @@ if "authenticated" not in st.session_state or not st.session_state.authenticated
     st.stop()
 
 # -------------------------
-# Oracle connection helper
-# -------------------------
-# -------------------------
 # Oracle connection helper with connection pooling
 # -------------------------
 
@@ -941,6 +373,262 @@ try:
     conn = get_conn()
 except Exception as e:
     st.error(f"Failed to connect to Oracle DB: {e}")
+    st.stop()
+
+# -------------------------
+# Utilities
+# -------------------------
+def safe_sql(v):
+    if v is None:
+        return ""
+    return str(v).replace("'", "''")
+
+def build_hospital_where(alias_list):
+    if selected_hospital in (None, "", "All Hospitals"):
+        return "1=1"
+    safe = safe_sql(selected_hospital)
+    parts = [f"{a}.HOSPITALID = '{safe}'" for a in alias_list]
+    parts.append(f"HOSPITALID = '{safe}'")
+    return "(" + " OR ".join(parts) + ")"
+
+# -------------------------
+# Sidebar Navigation (matching admin panel design)
+# -------------------------
+st.sidebar.title("🎛️ Navigation")
+
+col1, col2 = st.sidebar.columns(2)
+
+with col1:
+    # Dashboard (current page - disabled to show it's active)
+    st.button("🏠 Dashboard", use_container_width=True, disabled=True, key="nav_dashboard_current")
+    
+    # Change Password
+    if st.button("🔑 Password", use_container_width=True, key="nav_password"):
+        st.switch_page("pages/change_password.py")
+
+with col2:
+    # Admin Panel (only for admins)
+    if st.session_state.get("role") == "admin":
+        if st.button("⚙️ Admin", use_container_width=True, key="nav_admin"):
+            st.switch_page("pages/admin_panel.py")
+    
+    # Logout
+    if st.button("🔒 Logout", use_container_width=True, key="nav_logout"):
+        st.switch_page("app.py")
+
+st.sidebar.markdown("---")
+
+# User info display
+st.sidebar.info(f"""
+👤 **{st.session_state.get('staffname', 'User')}**  
+🏥 **Hospital:** {st.session_state.get('hospitalid', 'N/A')}  
+🔐 **Role:** {'🛡️ Admin' if st.session_state.get('role') == 'admin' else '👨‍⚕️ Staff'}
+""")
+
+st.sidebar.markdown("---")
+
+# -------------------------
+# Filters Section
+# -------------------------
+st.sidebar.header("📊 Filters")
+
+# Date range / Year-Month
+today = date.today()
+# Default to current month (first day to today)
+default_from = date(today.year, today.month, 1)
+default_to = today
+
+use_year_month = st.sidebar.checkbox("Use Year + Month filter (instead of From/To)", value=False)
+months = ["January","February","March","April","May","June","July","August","September","October","November","December"]
+
+if use_year_month:
+    years = list(range(2000, today.year + 1))[::-1]  # years from 2000 to current year
+    sel_year = st.sidebar.selectbox("Year", years, index=0)
+    sel_month = st.sidebar.selectbox("Month", months, index=today.month - 1)
+    m = months.index(sel_month) + 1
+    from_date = date(sel_year, m, 1)
+    to_date = (date(sel_year, m+1, 1) - timedelta(days=1)) if m < 12 else date(sel_year, 12, 31)
+else:
+    from_date = st.sidebar.date_input("From Date", value=default_from, min_value=date(2000,1,1), max_value=today)
+    to_date = st.sidebar.date_input("To Date", value=default_to, min_value=date(2000,1,1), max_value=today)
+
+# Department dropdown
+try:
+    dept_df = pd.read_sql("SELECT DISTINCT DEPTNAME, DEPTCODE, HOSPITALID FROM DEPARTMENT ORDER BY DEPTNAME", conn)
+    dept_list = ["All"] + dept_df["DEPTNAME"].dropna().tolist()
+except Exception:
+    dept_list = ["All"]
+selected_dept = st.sidebar.selectbox("Department", dept_list, index=0)
+
+# Hospital dropdown - default to user's hospital from STAFFMASTER.HOSPITALID
+try:
+    hosp_df = pd.read_sql("SELECT DISTINCT HOSPITALID FROM DEPARTMENT ORDER BY HOSPITALID", conn)
+    hosp_list = ["All Hospitals"] + hosp_df["HOSPITALID"].dropna().tolist()
+except Exception:
+    hosp_list = ["All Hospitals"]
+
+# Get user's hospital from session state (set during login from STAFFMASTER)
+user_hospital = st.session_state.get("hospitalid", None)
+default_index = 0
+if user_hospital and user_hospital in hosp_list:
+    default_index = hosp_list.index(user_hospital)
+    
+selected_hospital = st.sidebar.selectbox("Hospital", hosp_list, index=default_index)
+
+# =================================================================================
+# Ordering dept for radiology
+ordering_dept_options = ["All"] + (dept_df["DEPTNAME"].dropna().tolist() if 'dept_df' in globals() else [])
+selected_ordering_dept = st.sidebar.selectbox("Ordering Dept (for Radiology)", ordering_dept_options, index=0)
+
+# Radiology modality filter
+try:
+    category_base_q = "SELECT DISTINCT CATEGORY FROM STATS_DETAILS WHERE CATEGORY IS NOT NULL ORDER BY CATEGORY"
+    category_options_df = pd.read_sql(category_base_q, conn)
+    category_options = ["All"] + category_options_df["CATEGORY"].dropna().tolist()
+except Exception:
+    category_options = ["All"]
+
+selected_category = st.sidebar.selectbox("Category", category_options, index=0)
+
+# ======================== SURGEON FILTER ========================
+st.sidebar.subheader("Surgeon Filter")
+
+# ←←← MAKE SURE safe_sql() IS DEFINED BEFORE THIS BLOCK ←←←
+# (It is defined later in our file — so we define a tiny local version here if missing)
+try:
+    _ = safe_sql  # Test if already exists
+except NameError:
+    def safe_sql(v):
+        if v is None:
+            return ""
+        return str(v).replace("'", "''")
+
+# Checkbox: Lifetime vs Current Period
+use_lifetime = st.sidebar.checkbox(
+    "Show surgeons by total lifetime surgeries (not just selected period)",
+    value=True,
+    help="Uncheck to show only surgeons active in the selected date range"
+)
+
+# Safe hospital condition
+hospital_condition = "1=1"
+if selected_hospital and selected_hospital not in ("", "All Hospitals"):
+    hospital_condition = f"sp.HOSPITALID = '{safe_sql(selected_hospital)}'"
+
+# Build query
+if use_lifetime:
+    surgeon_q = f"""
+    SELECT 
+        sp.STAFFID,
+        NVL(sm.STAFFNAME, sp.STAFFID || ' (Name Missing)') AS STAFFNAME,
+        COUNT(*) AS TOTAL_SURGERIES
+    FROM SURGERY_PERSONNEL sp
+    LEFT JOIN STAFFMASTER sm ON sp.STAFFID = sm.STAFFID
+    WHERE sp.STAFFROLE = 'SURGEON'
+      AND {hospital_condition}
+    GROUP BY sp.STAFFID, sm.STAFFNAME
+    HAVING COUNT(*) > 0
+    ORDER BY TOTAL_SURGERIES DESC, STAFFNAME
+    """
+else:
+    surgeon_q = f"""
+    SELECT 
+        sp.STAFFID,
+        NVL(sm.STAFFNAME, sp.STAFFID || ' (Name Missing)') AS STAFFNAME,
+        COUNT(*) AS TOTAL_SURGERIES
+    FROM SURGERY_PERSONNEL sp
+    LEFT JOIN STAFFMASTER sm ON sp.STAFFID = sm.STAFFID
+    JOIN SURGERY s ON sp.SURGERYID = s.SURGERYID
+    WHERE sp.STAFFROLE = 'SURGEON'
+      AND s.SURGERYDATE BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD') 
+                            AND TO_DATE('{to_date}', 'YYYY-MM-DD') + 0.99999
+      AND {hospital_condition}
+    GROUP BY sp.STAFFID, sm.STAFFNAME
+    HAVING COUNT(*) > 0
+    ORDER BY TOTAL_SURGERIES DESC, STAFFNAME
+    """
+
+try:
+    surgeons_df = pd.read_sql(surgeon_q, conn)
+    if not surgeons_df.empty:
+        surgeons_df["DISPLAY"] = surgeons_df.apply(
+            lambda r: f"{r['STAFFNAME']} ({r['TOTAL_SURGERIES']} surgeries)", axis=1
+        )
+        surgeon_options = ["All Surgeons"] + surgeons_df["DISPLAY"].tolist()
+        surgeon_id_map = dict(zip(surgeons_df["DISPLAY"], surgeons_df["STAFFID"]))
+        surgeon_name_map = dict(zip(surgeons_df["DISPLAY"], surgeons_df["STAFFNAME"]))
+    else:
+        surgeon_options = ["All Surgeons"]
+        surgeon_id_map = surgeon_name_map = {}
+except Exception as e:
+    st.sidebar.error(f"Surgeon load failed: {e}")
+    surgeon_options = ["All Surgeons"]
+    surgeon_id_map = surgeon_name_map = {}
+
+selected_doctor_label = st.sidebar.selectbox(
+    "Surgeon (Real performers only)",
+    options=surgeon_options,
+    index=0,
+    key="surgeon_select_final"
+)
+
+# Extract selected surgeon
+selected_surgeon_id = surgeon_id_map.get(selected_doctor_label, None)
+selected_surgeon_name = surgeon_name_map.get(selected_doctor_label, None)
+
+# Show count in current period
+if selected_surgeon_id and not use_lifetime:
+    try:
+        cnt_q = f"""
+        SELECT COUNT(*) FROM SURGERY s
+        JOIN SURGERY_PERSONNEL sp ON s.SURGERYID = sp.SURGERYID
+        WHERE sp.STAFFROLE = 'SURGEON' 
+          AND sp.STAFFID = '{safe_sql(selected_surgeon_id)}'
+          AND s.SURGERYDATE BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD') 
+                                AND TO_DATE('{to_date}', 'YYYY-MM-DD') + 0.99999
+          AND (s.HOSPITALID = '{safe_sql(selected_hospital)}' OR '{selected_hospital}' = 'All Hospitals')
+        """
+        cnt = pd.read_sql(cnt_q, conn).iloc[0,0]
+        st.sidebar.success(f"Selected period: **{cnt}** surgeries")
+    except Exception as e:
+        st.sidebar.warning(f"Count failed: {e}")
+        cnt = pd.read_sql(cnt_q, conn).iloc[0,0]
+        st.sidebar.success(f"Selected period: **{cnt}** surgeries")
+    except:
+        pass
+
+# Update the sidebar display (around line 174):
+st.sidebar.markdown(f"**Range:** {from_date} → {to_date}")
+st.sidebar.markdown(f"**Department:** {selected_dept}")
+st.sidebar.markdown(f"**Hospital:** {selected_hospital}")
+st.sidebar.markdown(f"**Category:** {selected_category}")
+
+# -------------------------
+# Load Data Logic - Auto-load first time
+# -------------------------
+st.sidebar.markdown("---")
+
+# Initialize session state for first load tracking
+if "dashboard_first_load" not in st.session_state:
+    st.session_state.dashboard_first_load = True
+    st.session_state.data_loaded = True  # Auto-load on first visit
+
+# Load Data button
+load_data = st.sidebar.button("🔄 Load Data", type="primary", use_container_width=True)
+
+# Set data_loaded flag when button is clicked
+if load_data:
+    st.session_state.data_loaded = True
+    st.session_state.dashboard_first_load = False
+
+# For first visit, auto-load and show info message
+if st.session_state.dashboard_first_load:
+    #st.info("ℹ️ Dashboard loaded with default filters (your hospital, current month). Change filters and click **'Load Data'** to refresh.")
+    st.session_state.dashboard_first_load = False
+
+# Show message if data not loaded yet (only after first load)
+if not st.session_state.get("data_loaded", False):
+    st.info("👆 Please adjust your filters and click **'Load Data'** button in the sidebar to refresh dashboard.")
     st.stop()
 
 # -------------------------
@@ -1035,437 +723,12 @@ def export_data_options(df, base_filename):
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
-# -------------------------
-# Sidebar Navigation (matching admin panel design)
-# -------------------------
-st.sidebar.title("🎛️ Navigation")
 
-col1, col2 = st.sidebar.columns(2)
-
-with col1:
-    # Dashboard (current page - disabled to show it's active)
-    st.button("🏠 Dashboard", use_container_width=True, disabled=True, key="nav_dashboard_current")
-    
-    # Change Password
-    if st.button("🔑 Password", use_container_width=True, key="nav_password"):
-        st.switch_page("pages/change_password.py")
-
-with col2:
-    # Admin Panel (only for admins)
-    if st.session_state.get("role") == "admin":
-        if st.button("⚙️ Admin", use_container_width=True, key="nav_admin"):
-            st.switch_page("pages/admin_panel.py")
-    
-    # Logout
-    if st.button("🔒 Logout", use_container_width=True, key="nav_logout"):
-        st.switch_page("app.py")
-
-st.sidebar.markdown("---")
-
-# User info display
-st.sidebar.info(f"""
-👤 **{st.session_state.get('staffname', 'User')}**  
-🏥 **Hospital:** {st.session_state.get('hospitalid', 'N/A')}  
-🔐 **Role:** {'🛡️ Admin' if st.session_state.get('role') == 'admin' else '👨‍⚕️ Staff'}
-""")
-
-st.sidebar.markdown("---")
-
-# -------------------------
-# Filters Section
-# -------------------------
-st.sidebar.header("📊 Filters")
-
-# ... rest of your existing filter code continues here
-
-# Date range / Year-Month
-today = date.today()
-# Default to current month (first day to today)
-default_from = date(today.year, today.month, 1)
-default_to = today
-
-use_year_month = st.sidebar.checkbox("Use Year + Month filter (instead of From/To)", value=False)
-months = ["January","February","March","April","May","June","July","August","September","October","November","December"]
-
-if use_year_month:
-    years = list(range(2000, today.year + 1))[::-1]  # years from 2000 to current year
-    sel_year = st.sidebar.selectbox("Year", years, index=0)
-    sel_month = st.sidebar.selectbox("Month", months, index=today.month - 1)
-    m = months.index(sel_month) + 1
-    from_date = date(sel_year, m, 1)
-    to_date = (date(sel_year, m+1, 1) - timedelta(days=1)) if m < 12 else date(sel_year, 12, 31)
-else:
-    from_date = st.sidebar.date_input("From Date", value=default_from, min_value=date(2000,1,1), max_value=today)
-    to_date = st.sidebar.date_input("To Date", value=default_to, min_value=date(2000,1,1), max_value=today)
-
-# Department dropdown
-try:
-    dept_df = pd.read_sql("SELECT DISTINCT DEPTNAME, DEPTCODE, HOSPITALID FROM DEPARTMENT ORDER BY DEPTNAME", conn)
-    dept_list = ["All"] + dept_df["DEPTNAME"].dropna().tolist()
-except Exception:
-    dept_list = ["All"]
-selected_dept = st.sidebar.selectbox("Department", dept_list, index=0)
-
-# Hospital dropdown - default to user's hospital from STAFFMASTER.HOSPITALID
-try:
-    hosp_df = pd.read_sql("SELECT DISTINCT HOSPITALID FROM DEPARTMENT ORDER BY HOSPITALID", conn)
-    hosp_list = ["All Hospitals"] + hosp_df["HOSPITALID"].dropna().tolist()
-except Exception:
-    hosp_list = ["All Hospitals"]
-
-# Get user's hospital from session state (set during login from STAFFMASTER)
-user_hospital = st.session_state.get("hospitalid", None)
-default_index = 0
-if user_hospital and user_hospital in hosp_list:
-    default_index = hosp_list.index(user_hospital)
-    
-selected_hospital = st.sidebar.selectbox("Hospital", hosp_list, index=default_index)
-
-
-# =================================================================================
-
-# Ordering dept for radiology
-ordering_dept_options = ["All"] + (dept_df["DEPTNAME"].dropna().tolist() if 'dept_df' in globals() else [])
-selected_ordering_dept = st.sidebar.selectbox("Ordering Dept (for Radiology)", ordering_dept_options, index=0)
-
-# Radiology modality filter
-try:
-    category_base_q = "SELECT DISTINCT CATEGORY FROM STATS_DETAILS WHERE CATEGORY IS NOT NULL ORDER BY CATEGORY"
-    category_options_df = pd.read_sql(category_base_q, conn)
-    category_options = ["All"] + category_options_df["CATEGORY"].dropna().tolist()
-except Exception:
-    category_options = ["All"]
-
-selected_category = st.sidebar.selectbox("Category", category_options, index=0)
-# ======================== SURGEON FILTER – FINAL FIXED VERSION ========================
-st.sidebar.subheader("Surgeon Filter")
-
-# ←←← MAKE SURE safe_sql() IS DEFINED BEFORE THIS BLOCK ←←←
-# (It is defined later in your file — so we define a tiny local version here if missing)
-try:
-    _ = safe_sql  # Test if already exists
-except NameError:
-    def safe_sql(v):
-        if v is None:
-            return ""
-        return str(v).replace("'", "''")
-
-# Checkbox: Lifetime vs Current Period
-use_lifetime = st.sidebar.checkbox(
-    "Show surgeons by total lifetime surgeries (not just selected period)",
-    value=True,
-    help="Uncheck to show only surgeons active in the selected date range"
-)
-
-# Safe hospital condition
-hospital_condition = "1=1"
-if selected_hospital and selected_hospital not in ("", "All Hospitals"):
-    hospital_condition = f"sp.HOSPITALID = '{safe_sql(selected_hospital)}'"
-
-# Build query
-if use_lifetime:
-    surgeon_q = f"""
-    SELECT 
-        sp.STAFFID,
-        NVL(sm.STAFFNAME, sp.STAFFID || ' (Name Missing)') AS STAFFNAME,
-        COUNT(*) AS TOTAL_SURGERIES
-    FROM SURGERY_PERSONNEL sp
-    LEFT JOIN STAFFMASTER sm ON sp.STAFFID = sm.STAFFID
-    WHERE sp.STAFFROLE = 'SURGEON'
-      AND {hospital_condition}
-    GROUP BY sp.STAFFID, sm.STAFFNAME
-    HAVING COUNT(*) > 0
-    ORDER BY TOTAL_SURGERIES DESC, STAFFNAME
-    """
-else:
-    surgeon_q = f"""
-    SELECT 
-        sp.STAFFID,
-        NVL(sm.STAFFNAME, sp.STAFFID || ' (Name Missing)') AS STAFFNAME,
-        COUNT(*) AS TOTAL_SURGERIES
-    FROM SURGERY_PERSONNEL sp
-    LEFT JOIN STAFFMASTER sm ON sp.STAFFID = sm.STAFFID
-    JOIN SURGERY s ON sp.SURGERYID = s.SURGERYID
-    WHERE sp.STAFFROLE = 'SURGEON'
-      AND s.SURGERYDATE BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD') 
-                            AND TO_DATE('{to_date}', 'YYYY-MM-DD') + 0.99999
-      AND {hospital_condition}
-    GROUP BY sp.STAFFID, sm.STAFFNAME
-    HAVING COUNT(*) > 0
-    ORDER BY TOTAL_SURGERIES DESC, STAFFNAME
-    """
-
-try:
-    surgeons_df = pd.read_sql(surgeon_q, conn)
-    if not surgeons_df.empty:
-        surgeons_df["DISPLAY"] = surgeons_df.apply(
-            lambda r: f"{r['STAFFNAME']} ({r['TOTAL_SURGERIES']} surgeries)", axis=1
-        )
-        surgeon_options = ["All Surgeons"] + surgeons_df["DISPLAY"].tolist()
-        surgeon_id_map = dict(zip(surgeons_df["DISPLAY"], surgeons_df["STAFFID"]))
-        surgeon_name_map = dict(zip(surgeons_df["DISPLAY"], surgeons_df["STAFFNAME"]))
-    else:
-        surgeon_options = ["All Surgeons"]
-        surgeon_id_map = surgeon_name_map = {}
-except Exception as e:
-    st.sidebar.error(f"Surgeon load failed: {e}")
-    surgeon_options = ["All Surgeons"]
-    surgeon_id_map = surgeon_name_map = {}
-
-selected_doctor_label = st.sidebar.selectbox(
-    "Surgeon (Real performers only)",
-    options=surgeon_options,
-    index=0,
-    key="surgeon_select_final"
-)
-
-# Extract selected surgeon
-selected_surgeon_id = surgeon_id_map.get(selected_doctor_label, None)
-selected_surgeon_name = surgeon_name_map.get(selected_doctor_label, None)
-
-# Optional: Show count in current period
-# Optional: Show count in current period (FIXED — removed undefined 'cterm')
-if selected_surgeon_id and not use_lifetime:
-    try:
-        cnt_q = f"""
-        SELECT COUNT(*) FROM SURGERY s
-        JOIN SURGERY_PERSONNEL sp ON s.SURGERYID = sp.SURGERYID
-        WHERE sp.STAFFROLE = 'SURGEON' 
-          AND sp.STAFFID = '{safe_sql(selected_surgeon_id)}'
-          AND s.SURGERYDATE BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD') 
-                                AND TO_DATE('{to_date}', 'YYYY-MM-DD') + 0.99999
-          AND (s.HOSPITALID = '{safe_sql(selected_hospital)}' OR '{selected_hospital}' = 'All Hospitals')
-        """
-        cnt = pd.read_sql(cnt_q, conn).iloc[0,0]
-        st.sidebar.success(f"Selected period: **{cnt}** surgeries")
-    except Exception as e:
-        st.sidebar.warning(f"Count failed: {e}")
-        cnt = pd.read_sql(cnt_q, conn).iloc[0,0]
-        st.sidebar.success(f"Selected period: **{cnt}** surgeries")
-    except:
-        pass
-# Update the sidebar display (around line 174):
-st.sidebar.markdown(f"**Range:** {from_date} → {to_date}")
-st.sidebar.markdown(f"**Department:** {selected_dept}")
-st.sidebar.markdown(f"**Hospital:** {selected_hospital}")
-st.sidebar.markdown(f"**Category:** {selected_category}")
-
-# -------------------------
-# Load Data Logic - Auto-load first time, then require button
-# -------------------------
-st.sidebar.markdown("---")
-
-# Initialize session state for first load tracking
-if "dashboard_first_load" not in st.session_state:
-    st.session_state.dashboard_first_load = True
-    st.session_state.data_loaded = True  # Auto-load on first visit
-
-# Load Data button
-load_data = st.sidebar.button("🔄 Load Data", type="primary", use_container_width=True)
-
-# Set data_loaded flag when button is clicked
-if load_data:
-    st.session_state.data_loaded = True
-    st.session_state.dashboard_first_load = False
-
-# For first visit, auto-load and show info message
-if st.session_state.dashboard_first_load:
-    #st.info("ℹ️ Dashboard loaded with default filters (your hospital, current month). Change filters and click **'Load Data'** to refresh.")
-    st.session_state.dashboard_first_load = False
-
-# Show message if data not loaded yet (only after first load)
-if not st.session_state.get("data_loaded", False):
-    st.info("👆 Please adjust your filters and click **'Load Data'** button in the sidebar to refresh dashboard.")
-    st.stop()
-
-
-# -------------------------
-# Utilities
-# -------------------------
-def safe_sql(v):
-    if v is None:
-        return ""
-    return str(v).replace("'", "''")
-
-def build_hospital_where(alias_list):
-    if selected_hospital in (None, "", "All Hospitals"):
-        return "1=1"
-    safe = safe_sql(selected_hospital)
-    parts = [f"{a}.HOSPITALID = '{safe}'" for a in alias_list]
-    parts.append(f"HOSPITALID = '{safe}'")
-    return "(" + " OR ".join(parts) + ")"
-    
 # -------------------------
 # Data functions
 # -------------------------
-def calculate_bed_occupancy(from_date, to_date, dept_name=None, location_filter=None):
-    """Calculate bed occupancy with proper department filtering"""
-    try:
-        # Build bed query with filters
-        bed_query = """
-            SELECT 
-                SPECIALITY,
-                LOCATION,
-                NVL(BEDSTRENGTH, 0) AS BEDSTRENGTH
-            FROM BEDMASTER
-            WHERE STATUS = 'A'
-        """
-        
-        bed_conditions = []
-        
-        # Department filter - map DEPTNAME to SPECIALITY in BEDMASTER
-        if dept_name and dept_name not in (None, "", "All"):
-            # Option 1: Direct match if SPECIALITY stores department names
-            bed_conditions.append(f"SPECIALITY = '{safe_sql(dept_name)}'")
-            
-            # Option 2: If you need to map DEPTCODE to SPECIALITY:
-            # try:
-            #     dept_code_q = f"SELECT DEPTCODE FROM DEPARTMENT WHERE DEPTNAME = '{safe_sql(dept_name)}' AND ROWNUM = 1"
-            #     dept_code_df = pd.read_sql(dept_code_q, conn)
-            #     if not dept_code_df.empty:
-            #         dept_code = dept_code_df['DEPTCODE'].iloc[0]
-            #         bed_conditions.append(f"DEPTCODE = '{safe_sql(dept_code)}'")
-            # except:
-            #     pass
-        
-        # Location filter
-        if location_filter and location_filter not in (None, "", "All"):
-            bed_conditions.append(f"LOCATION = '{safe_sql(location_filter)}'")
-        
-        if bed_conditions:
-            bed_query += " AND " + " AND ".join(bed_conditions)
-        
-        bed_df = pd.read_sql(bed_query, conn)
-        total_beds = int(bed_df['BEDSTRENGTH'].sum()) if not bed_df.empty else 0
-        
-        if total_beds == 0:
-            return 0.0, 0.0, 0, pd.DataFrame()
-        
-        # Rest of the function remains the same...
-        
-        # Build census query with matching logic
-        # CENSUSDATA.SPECIALITY should match BEDMASTER.LOCATION
-        census_query = f"""
-            SELECT 
-                THEDATE,
-                SPECIALITY,
-                NVL(OPBAL, 0) AS OPBAL,
-                NVL(ADMIT, 0) AS ADMIT,
-                NVL(DISCH, 0) AS DISCH,
-                NVL(TRIN, 0) AS TRIN,
-                NVL(TROUT, 0) AS TROUT,
-                NVL(DEATH, 0) AS DEATH,
-                (NVL(OPBAL, 0) + NVL(ADMIT, 0) - NVL(DISCH, 0) + NVL(TRIN, 0) - NVL(TROUT, 0) - NVL(DEATH, 0)) AS DAILY_OCCUPANCY
-            FROM CENSUSDATA
-            WHERE THEDATE BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD') 
-                              AND TO_DATE('{to_date}', 'YYYY-MM-DD')
-        """
-        
-        census_conditions = []
-        
-        # Match CENSUSDATA.SPECIALITY with BEDMASTER.LOCATION
-        if location_filter and location_filter not in (None, "", "All"):
-            census_conditions.append(f"SPECIALITY = '{safe_sql(location_filter)}'")
-        elif dept_name and dept_name not in (None, "", "All"):
-            # Get all locations for this department
-            dept_locations = bed_df[bed_df['SPECIALITY'] == dept_name]['LOCATION'].tolist()
-            if dept_locations:
-                location_list = "', '".join([safe_sql(loc) for loc in dept_locations])
-                census_conditions.append(f"SPECIALITY IN ('{location_list}')")
-        
-        if census_conditions:
-            census_query += " AND " + " AND ".join(census_conditions)
-        
-        census_query += " ORDER BY THEDATE, SPECIALITY"
-        
-        census_df = pd.read_sql(census_query, conn)
-        
-        if census_df.empty:
-            return 0.0, 0.0, total_beds, pd.DataFrame()
-        
-        # Calculate metrics
-        total_patient_days = census_df['DAILY_OCCUPANCY'].sum()
-        days_in_period = (to_date - from_date).days + 1
-        available_bed_days = total_beds * days_in_period
-        
-        occupancy_rate = (total_patient_days / available_bed_days * 100) if available_bed_days > 0 else 0.0
-        avg_daily_census = total_patient_days / days_in_period if days_in_period > 0 else 0.0
-        
-        # Return detail dataframe for drill-down
-        return round(occupancy_rate, 2), round(avg_daily_census, 1), total_beds, census_df
-        
-    except Exception as e:
-        st.error(f"Error calculating bed occupancy: {e}")
-        return 0.0, 0.0, 0, pd.DataFrame()
 
-def get_department_occupancy_breakdown(from_date, to_date):
-    """Get bed occupancy breakdown by department"""
-    try:
-        # Get all departments from BEDMASTER
-        dept_query = """
-            SELECT DISTINCT SPECIALITY
-            FROM BEDMASTER
-            WHERE STATUS = 'A' AND SPECIALITY IS NOT NULL
-            ORDER BY SPECIALITY
-        """
-        dept_df = pd.read_sql(dept_query, conn)
-        
-        results = []
-        for dept in dept_df['SPECIALITY']:
-            rate, avg_census, beds, _ = calculate_bed_occupancy(from_date, to_date, dept_name=dept)
-            results.append({
-                'DEPARTMENT': dept,
-                'TOTAL_BEDS': beds,
-                'AVG_CENSUS': avg_census,
-                'OCCUPANCY_RATE': rate
-            })
-        
-        return pd.DataFrame(results)
-    except Exception as e:
-        st.error(f"Error getting department breakdown: {e}")
-        return pd.DataFrame()
-
-
-def get_location_occupancy_breakdown(from_date, to_date, dept_name=None):
-    """Get bed occupancy breakdown by location (ward/ICU level)"""
-    try:
-        # Get locations from BEDMASTER
-        loc_query = """
-            SELECT 
-                SPECIALITY AS DEPARTMENT,
-                LOCATION,
-                BEDSTRENGTH
-            FROM BEDMASTER
-            WHERE STATUS = 'A'
-        """
-        
-        if dept_name and dept_name not in (None, "", "All"):
-            loc_query += f" AND SPECIALITY = '{safe_sql(dept_name)}'"
-        
-        loc_query += " ORDER BY SPECIALITY, LOCATION"
-        
-        loc_df = pd.read_sql(loc_query, conn)
-        
-        results = []
-        for _, row in loc_df.iterrows():
-            rate, avg_census, beds, _ = calculate_bed_occupancy(
-                from_date, to_date, 
-                dept_name=row['DEPARTMENT'], 
-                location_filter=row['LOCATION']
-            )
-            results.append({
-                'DEPARTMENT': row['DEPARTMENT'],
-                'LOCATION': row['LOCATION'],
-                'TOTAL_BEDS': row['BEDSTRENGTH'],
-                'AVG_CENSUS': avg_census,
-                'OCCUPANCY_RATE': rate
-            })
-        
-        return pd.DataFrame(results)
-    except Exception as e:
-        st.error(f"Error getting location breakdown: {e}")
-        return pd.DataFrame()
-    
+# Inpatients Function 
 def load_inpatients(from_date, to_date, dept_name):
     # Build department filter
     if dept_name in (None, "", "All"):
@@ -1502,6 +765,7 @@ def load_inpatients(from_date, to_date, dept_name):
         st.error(f"Error loading inpatients: {e}")
         return pd.DataFrame()
 
+# Outpatients Function
 def load_outpatients(from_date, to_date, dept_name):
     # Build department filter
     if dept_name in (None, "", "All"):
@@ -1526,108 +790,8 @@ def load_outpatients(from_date, to_date, dept_name):
     except Exception as e:
         st.error(f"Error loading outpatients: {e}")
         return pd.DataFrame()
-
-def compute_age_distribution():
-    try:
-        q = "SELECT TRUNC(MONTHS_BETWEEN(SYSDATE, DOB) / 12) AS AGE FROM PATIENT WHERE DOB IS NOT NULL"
-        df = pd.read_sql(q, conn)
-        if df.empty:
-            return None, pd.DataFrame(columns=['AGE_GROUP','CNT'])
-        avg_age = df['AGE'].mean()
-        bins = [0,20,40,60,80,200]
-        labels = ['0-19','20-39','40-59','60-79','80+']
-        df['AGE_GROUP'] = pd.cut(df['AGE'], bins=bins, labels=labels, right=False)
-        age_dist = df.groupby('AGE_GROUP').size().reset_index(name='CNT')
-        return avg_age, age_dist
-    except Exception:
-        return None, pd.DataFrame(columns=['AGE_GROUP','CNT'])
-
-def admission_type_breakdown(from_date, to_date, dept_name):
-    # Build department filter
-    if dept_name in (None, "", "All"):
-        dept_filter = "1=1"
-    else:
-        try:
-            dept_code_q = f"SELECT DEPTCODE FROM DEPARTMENT WHERE DEPTNAME = '{safe_sql(dept_name)}' AND ROWNUM = 1"
-            dept_code_df = pd.read_sql(dept_code_q, conn)
-            if not dept_code_df.empty:
-                dept_code = dept_code_df['DEPTCODE'].iloc[0]
-                dept_filter = f"I.DEPTCODE = '{safe_sql(dept_code)}'"
-            else:
-                dept_filter = "1=1"
-        except:
-            dept_filter = "1=1"
     
-    # Hospital filter
-    if selected_hospital in (None, "", "All Hospitals"):
-        hosp_filter = "1=1"
-    else:
-        hosp_filter = f"I.HOSPITALID = '{safe_sql(selected_hospital)}'"
-    
-    q = (
-        "SELECT NVL(ADMISSIONTYPE,'UNKNOWN') AS ADMISSIONTYPE, COUNT(*) AS CNT "
-        "FROM INPATIENT I "
-        f"WHERE {dept_filter} AND {hosp_filter} "
-        f"AND I.DOA BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD') AND TO_DATE('{to_date}', 'YYYY-MM-DD') "
-        "GROUP BY NVL(ADMISSIONTYPE,'UNKNOWN') ORDER BY CNT DESC"
-    )
-    try:
-        return pd.read_sql(q, conn)
-    except Exception:
-        return pd.DataFrame(columns=['ADMISSIONTYPE','CNT'])
-
-def load_surgery_metrics(from_date, to_date, dept_name, surgeon_id):
-    surg_dept_filter = "1=1" if dept_name in (None, "", "All") else f"D.DEPTNAME = '{safe_sql(dept_name)}'"
-    
-    # Fixed hospital filter
-    if selected_hospital in (None, "", "All Hospitals"):
-        surg_hosp_filter = "1=1"
-    else:
-        surg_hosp_filter = f"S.HOSPITALID = '{safe_sql(selected_hospital)}'"
-    
-    surg_date_cond = f"S.SURGERYDATE BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD') AND TO_DATE('{to_date}', 'YYYY-MM-DD')"
-
-    # total surgeries
-    try:
-        total_q = (
-            "SELECT COUNT(*) AS CNT FROM SURGERY S JOIN DEPARTMENT D ON S.DEPTCODE = D.DEPTCODE AND S.HOSPITALID = D.HOSPITALID "
-            f"WHERE {surg_date_cond} AND {surg_dept_filter} AND {surg_hosp_filter}"
-        )
-        total = int(pd.read_sql(total_q, conn)["CNT"].iloc[0])
-    except Exception:
-        total = 0
-
-    # by surgeon
-    if surgeon_id:
-        try:
-            bydoc_q = (
-                "SELECT COUNT(*) AS CNT FROM SURGERY S JOIN DEPARTMENT D ON S.DEPTCODE = D.DEPTCODE AND S.HOSPITALID = D.HOSPITALID "
-                f"WHERE {surg_date_cond} AND {surg_dept_filter} AND {surg_hosp_filter} AND S.SURGEONID = '{safe_sql(surgeon_id)}'"
-            )
-            bydoc = int(pd.read_sql(bydoc_q, conn)["CNT"].iloc[0])
-        except Exception:
-            bydoc = 0
-    else:
-        bydoc = None
-
-    # top surgery type
-    try:
-        top_q = (
-            "SELECT NVL(SURGERYTYPE,'UNKNOWN') AS SURGERYTYPE, COUNT(*) AS CNT "
-            "FROM SURGERY S JOIN DEPARTMENT D ON S.DEPTCODE = D.DEPTCODE AND S.HOSPITALID = D.HOSPITALID "
-            f"WHERE {surg_date_cond} AND {surg_dept_filter} AND {surg_hosp_filter} "
-            "GROUP BY NVL(SURGERYTYPE,'UNKNOWN') ORDER BY CNT DESC"
-        )
-        top_df = pd.read_sql(top_q, conn)
-        top_type = top_df["SURGERYTYPE"].iloc[0] if not top_df.empty else "N/A"
-    except Exception:
-        top_type = "N/A"
-
-    days = (to_date - from_date).days + 1
-    daily_avg = (total / days) if days > 0 else 0.0
-
-    return {"total": total, "bydoc": bydoc, "top_type": top_type, "daily_avg": daily_avg}
-
+# Operational Efficiency Functions
 def get_category_metrics(from_date, to_date, category_filter, ordering_dept):
     """
     Level 1: Get metrics for each CATEGORY.
@@ -1793,124 +957,7 @@ def get_subcatgl2_metrics(category, subcatg, from_date, to_date, ordering_dept):
         return metrics
     except Exception:
         return []
-
-def state_stats_aggregate(from_date, to_date, use_year_month=False, sel_year=None, sel_month=None):
-    base_where = "1=1"
-    if selected_hospital not in (None, '', 'All Hospitals'):
-        base_where = f"HOSPITALID = '{safe_sql(selected_hospital)}'"
-
-    if use_year_month:
-        year = sel_year
-        month = sel_month
-        ss_q = (
-            "SELECT STATE, SUM(CNT) AS CNT FROM STATESTATS "
-            f"WHERE {base_where} AND THEYR = {year} AND THEMNTH = {month} "
-            "GROUP BY STATE ORDER BY CNT DESC"
-        )
-        try:
-            ss_df = pd.read_sql(ss_q, conn)
-            return ss_df
-        except Exception:
-            return pd.DataFrame(columns=['STATE','CNT'])
-    else:
-        try:
-            ss_q = f"SELECT THEYR, THEMNTH, STATE, CNT FROM STATESTATS WHERE {base_where}"
-            ss_df = pd.read_sql(ss_q, conn)
-            if ss_df.empty:
-                return pd.DataFrame(columns=['STATE','CNT'])
-            ss_df['THEDATE'] = pd.to_datetime(ss_df['THEYR'].astype(int).astype(str) + '-' + ss_df['THEMNTH'].astype(int).astype(str) + '-01')
-            mask = (ss_df['THEDATE'].dt.date >= pd.to_datetime(from_date).date()) & (ss_df['THEDATE'].dt.date <= pd.to_datetime(to_date).date())
-            ss_df = ss_df.loc[mask]
-            state_agg = ss_df.groupby('STATE', as_index=False)['CNT'].sum().sort_values('CNT', ascending=False)
-            return state_agg
-        except Exception:
-            return pd.DataFrame(columns=['STATE','CNT'])
-
-def read_staff_patient_ratio():
-    candidates = ["STAFF_PATIENT_RATIO", "STAFF_PATIENT"]
-    for tab in candidates:
-        try:
-            q = f"SELECT * FROM {tab} FETCH FIRST 1 ROWS ONLY"
-            df = pd.read_sql(q, conn)
-            if not df.empty:
-                return df
-        except Exception:
-            continue
-    return None
-
-# -------------------------
-# Reports tab functions
-# -------------------------
-def search_mrns(prefix: str, limit: int = 100):
-    """Return up to `limit` MRNs from NOTESDATA that match the prefix (case-insensitive)."""
-    if prefix is None:
-        return []
-    safe_prefix = safe_sql(prefix.strip())
-    if safe_prefix == "":
-        return []
-    like_val = f"%{safe_prefix}%"
-    q = f"SELECT DISTINCT MRN FROM NOTESDATA WHERE MRN LIKE '{like_val}' AND ROWNUM <= {limit} ORDER BY MRN"
-    try:
-        df = pd.read_sql(q, conn)
-        return df['MRN'].dropna().tolist() if not df.empty else []
-    except Exception:
-        return []
-
-def fetch_reports_for_mrn(mrn: str):
-    """Return DataFrame of reports for a given MRN."""
-    if not mrn:
-        return pd.DataFrame()
-    safe_mrn = safe_sql(mrn)
-    q = (
-        "SELECT ACCESSION_NUM, NOTENAME, VISITTYPE, VISITDATE, DONEBY, DEPTNAME, NOTEDATA "
-        "FROM NOTESDATA "
-        f"WHERE MRN = '{safe_mrn}' "
-        "ORDER BY NVL(VISITDATE, TO_DATE('1900-01-01','YYYY-MM-DD')) DESC"
-    )
-    try:
-        df = pd.read_sql(q, conn)
-        expected_cols = ['ACCESSION_NUM','NOTENAME','VISITTYPE','VISITDATE','DONEBY','DEPTNAME','NOTEDATA']
-        for c in expected_cols:
-            if c not in df.columns:
-                df[c] = None
-        return df[expected_cols]
-    except Exception:
-        return pd.DataFrame(columns=['ACCESSION_NUM','NOTENAME','VISITTYPE','VISITDATE','DONEBY','DEPTNAME','NOTEDATA'])
-
-def build_report_label(row):
-    """Produce a friendly label for a report in multi-select: accession | name | date"""
-    acc = str(row.get('ACCESSION_NUM','')) if pd.notna(row.get('ACCESSION_NUM',None)) else ''
-    name = row.get('NOTENAME','') if pd.notna(row.get('NOTENAME',None)) else ''
-    date_val = row.get('VISITDATE',None)
-    if pd.isna(date_val) or date_val is None:
-        date_str = ''
-    else:
-        if isinstance(date_val, str):
-            date_str = date_val
-        elif isinstance(date_val, (datetime, pd.Timestamp)):
-            date_str = date_val.strftime('%Y-%m-%d')
-        else:
-            date_str = str(date_val)
-    label = f"{acc} | {name} | {date_str}"
-    return label
-
-def create_zip_of_reports(reports_df: pd.DataFrame, selected_accessions: list):
-    """Create a ZIP in-memory with one .html file per selected accession. Returns bytes."""
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
-        for acc in selected_accessions:
-            row = reports_df[reports_df['ACCESSION_NUM'] == acc]
-            if row.empty:
-                continue
-            html_content = row.iloc[0].get('NOTEDATA', '') or ''
-            fname = f"{str(acc)}.html"
-            zf.writestr(fname, html_content)
-    buf.seek(0)
-    return buf.read()
-
-# -------------------------------------------------
-# NEW: Full Category PDF Report (All SUBCATG + SUBCATGL2)
-# -------------------------------------------------
+    
 def build_category_pdf(category, from_date, to_date, ordering_dept):
     """Generate multi-page PDF: one section per SUBCATG with full SUBCATGL2 table"""
     buffer = io.BytesIO()
@@ -1990,6 +1037,919 @@ def build_category_pdf(category, from_date, to_date, ordering_dept):
     doc.build(elements, onFirstPage=add_page_number, onLaterPages=add_page_number)
     buffer.seek(0)
     return buffer.getvalue()
+    
+# Bed Occupancy Analysis Functions
+def calculate_bed_occupancy(from_date, to_date, dept_name=None, location_filter=None):
+    """Calculate bed occupancy with proper department filtering"""
+    try:
+        # Build bed query with filters
+        bed_query = """
+            SELECT 
+                SPECIALITY,
+                LOCATION,
+                NVL(BEDSTRENGTH, 0) AS BEDSTRENGTH
+            FROM BEDMASTER
+            WHERE STATUS = 'A'
+        """
+        
+        bed_conditions = []
+        
+        # Department filter - map DEPTNAME to SPECIALITY in BEDMASTER
+        if dept_name and dept_name not in (None, "", "All"):
+            bed_conditions.append(f"SPECIALITY = '{safe_sql(dept_name)}'")
+        
+        # Location filter
+        if location_filter and location_filter not in (None, "", "All"):
+            bed_conditions.append(f"LOCATION = '{safe_sql(location_filter)}'")
+        
+        if bed_conditions:
+            bed_query += " AND " + " AND ".join(bed_conditions)
+        
+        bed_df = pd.read_sql(bed_query, conn)
+        total_beds = int(bed_df['BEDSTRENGTH'].sum()) if not bed_df.empty else 0
+        
+        if total_beds == 0:
+            return 0.0, 0.0, 0, pd.DataFrame()
+        
+        # Rest of the function remains the same...
+        
+        # Build census query with matching logic
+        # CENSUSDATA.SPECIALITY should match BEDMASTER.LOCATION
+        census_query = f"""
+            SELECT 
+                THEDATE,
+                SPECIALITY,
+                NVL(OPBAL, 0) AS OPBAL,
+                NVL(ADMIT, 0) AS ADMIT,
+                NVL(DISCH, 0) AS DISCH,
+                NVL(TRIN, 0) AS TRIN,
+                NVL(TROUT, 0) AS TROUT,
+                NVL(DEATH, 0) AS DEATH,
+                (NVL(OPBAL, 0) + NVL(ADMIT, 0) - NVL(DISCH, 0) + NVL(TRIN, 0) - NVL(TROUT, 0) - NVL(DEATH, 0)) AS DAILY_OCCUPANCY
+            FROM CENSUSDATA
+            WHERE THEDATE BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD') 
+                              AND TO_DATE('{to_date}', 'YYYY-MM-DD')
+        """
+        
+        census_conditions = []
+        
+        # Match CENSUSDATA.SPECIALITY with BEDMASTER.LOCATION
+        if location_filter and location_filter not in (None, "", "All"):
+            census_conditions.append(f"SPECIALITY = '{safe_sql(location_filter)}'")
+        elif dept_name and dept_name not in (None, "", "All"):
+            # Get all locations for this department
+            dept_locations = bed_df[bed_df['SPECIALITY'] == dept_name]['LOCATION'].tolist()
+            if dept_locations:
+                location_list = "', '".join([safe_sql(loc) for loc in dept_locations])
+                census_conditions.append(f"SPECIALITY IN ('{location_list}')")
+        
+        if census_conditions:
+            census_query += " AND " + " AND ".join(census_conditions)
+        
+        census_query += " ORDER BY THEDATE, SPECIALITY"
+        
+        census_df = pd.read_sql(census_query, conn)
+        
+        if census_df.empty:
+            return 0.0, 0.0, total_beds, pd.DataFrame()
+        
+        # Calculate metrics
+        total_patient_days = census_df['DAILY_OCCUPANCY'].sum()
+        days_in_period = (to_date - from_date).days + 1
+        available_bed_days = total_beds * days_in_period
+        
+        occupancy_rate = (total_patient_days / available_bed_days * 100) if available_bed_days > 0 else 0.0
+        avg_daily_census = total_patient_days / days_in_period if days_in_period > 0 else 0.0
+        
+        # Return detail dataframe for drill-down
+        return round(occupancy_rate, 2), round(avg_daily_census, 1), total_beds, census_df
+        
+    except Exception as e:
+        st.error(f"Error calculating bed occupancy: {e}")
+        return 0.0, 0.0, 0, pd.DataFrame()
+
+def get_department_occupancy_breakdown(from_date, to_date):
+    """Get bed occupancy breakdown by department"""
+    try:
+        # Get all departments from BEDMASTER
+        dept_query = """
+            SELECT DISTINCT SPECIALITY
+            FROM BEDMASTER
+            WHERE STATUS = 'A' AND SPECIALITY IS NOT NULL
+            ORDER BY SPECIALITY
+        """
+        dept_df = pd.read_sql(dept_query, conn)
+        
+        results = []
+        for dept in dept_df['SPECIALITY']:
+            rate, avg_census, beds, _ = calculate_bed_occupancy(from_date, to_date, dept_name=dept)
+            results.append({
+                'DEPARTMENT': dept,
+                'TOTAL_BEDS': beds,
+                'AVG_CENSUS': avg_census,
+                'OCCUPANCY_RATE': rate
+            })
+        
+        return pd.DataFrame(results)
+    except Exception as e:
+        st.error(f"Error getting department breakdown: {e}")
+        return pd.DataFrame()
+
+def get_location_occupancy_breakdown(from_date, to_date, dept_name=None):
+    """Get bed occupancy breakdown by location (ward/ICU level)"""
+    try:
+        # Get locations from BEDMASTER
+        loc_query = """
+            SELECT 
+                SPECIALITY AS DEPARTMENT,
+                LOCATION,
+                BEDSTRENGTH
+            FROM BEDMASTER
+            WHERE STATUS = 'A'
+        """
+        
+        if dept_name and dept_name not in (None, "", "All"):
+            loc_query += f" AND SPECIALITY = '{safe_sql(dept_name)}'"
+        
+        loc_query += " ORDER BY SPECIALITY, LOCATION"
+        
+        loc_df = pd.read_sql(loc_query, conn)
+        
+        results = []
+        for _, row in loc_df.iterrows():
+            rate, avg_census, beds, _ = calculate_bed_occupancy(
+                from_date, to_date, 
+                dept_name=row['DEPARTMENT'], 
+                location_filter=row['LOCATION']
+            )
+            results.append({
+                'DEPARTMENT': row['DEPARTMENT'],
+                'LOCATION': row['LOCATION'],
+                'TOTAL_BEDS': row['BEDSTRENGTH'],
+                'AVG_CENSUS': avg_census,
+                'OCCUPANCY_RATE': rate
+            })
+        
+        return pd.DataFrame(results)
+    except Exception as e:
+        st.error(f"Error getting location breakdown: {e}")
+        return pd.DataFrame()
+    
+# Stats Age Distribution Function
+def compute_age_distribution():
+    try:
+        q = "SELECT TRUNC(MONTHS_BETWEEN(SYSDATE, DOB) / 12) AS AGE FROM PATIENT WHERE DOB IS NOT NULL"
+        df = pd.read_sql(q, conn)
+        if df.empty:
+            return None, pd.DataFrame(columns=['AGE_GROUP','CNT'])
+        avg_age = df['AGE'].mean()
+        bins = [0,20,40,60,80,200]
+        labels = ['0-19','20-39','40-59','60-79','80+']
+        df['AGE_GROUP'] = pd.cut(df['AGE'], bins=bins, labels=labels, right=False)
+        age_dist = df.groupby('AGE_GROUP').size().reset_index(name='CNT')
+        return avg_age, age_dist
+    except Exception:
+        return None, pd.DataFrame(columns=['AGE_GROUP','CNT'])
+
+# Stats Admission Type Breakdown Functions
+def admission_type_breakdown(from_date, to_date, dept_name):
+    # Build department filter
+    if dept_name in (None, "", "All"):
+        dept_filter = "1=1"
+    else:
+        try:
+            dept_code_q = f"SELECT DEPTCODE FROM DEPARTMENT WHERE DEPTNAME = '{safe_sql(dept_name)}' AND ROWNUM = 1"
+            dept_code_df = pd.read_sql(dept_code_q, conn)
+            if not dept_code_df.empty:
+                dept_code = dept_code_df['DEPTCODE'].iloc[0]
+                dept_filter = f"I.DEPTCODE = '{safe_sql(dept_code)}'"
+            else:
+                dept_filter = "1=1"
+        except:
+            dept_filter = "1=1"
+    
+    # Hospital filter
+    if selected_hospital in (None, "", "All Hospitals"):
+        hosp_filter = "1=1"
+    else:
+        hosp_filter = f"I.HOSPITALID = '{safe_sql(selected_hospital)}'"
+    
+    q = (
+        "SELECT NVL(ADMISSIONTYPE,'UNKNOWN') AS ADMISSIONTYPE, COUNT(*) AS CNT "
+        "FROM INPATIENT I "
+        f"WHERE {dept_filter} AND {hosp_filter} "
+        f"AND I.DOA BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD') AND TO_DATE('{to_date}', 'YYYY-MM-DD') "
+        "GROUP BY NVL(ADMISSIONTYPE,'UNKNOWN') ORDER BY CNT DESC"
+    )
+    try:
+        return pd.read_sql(q, conn)
+    except Exception:
+        return pd.DataFrame(columns=['ADMISSIONTYPE','CNT'])
+
+# Stats State Metrics Function
+def state_stats_aggregate(from_date, to_date, use_year_month=False, sel_year=None, sel_month=None):
+    base_where = "1=1"
+    if selected_hospital not in (None, '', 'All Hospitals'):
+        base_where = f"HOSPITALID = '{safe_sql(selected_hospital)}'"
+
+    if use_year_month:
+        year = sel_year
+        month = sel_month
+        ss_q = (
+            "SELECT STATE, SUM(CNT) AS CNT FROM STATESTATS "
+            f"WHERE {base_where} AND THEYR = {year} AND THEMNTH = {month} "
+            "GROUP BY STATE ORDER BY CNT DESC"
+        )
+        try:
+            ss_df = pd.read_sql(ss_q, conn)
+            return ss_df
+        except Exception:
+            return pd.DataFrame(columns=['STATE','CNT'])
+    else:
+        try:
+            ss_q = f"SELECT THEYR, THEMNTH, STATE, CNT FROM STATESTATS WHERE {base_where}"
+            ss_df = pd.read_sql(ss_q, conn)
+            if ss_df.empty:
+                return pd.DataFrame(columns=['STATE','CNT'])
+            ss_df['THEDATE'] = pd.to_datetime(ss_df['THEYR'].astype(int).astype(str) + '-' + ss_df['THEMNTH'].astype(int).astype(str) + '-01')
+            mask = (ss_df['THEDATE'].dt.date >= pd.to_datetime(from_date).date()) & (ss_df['THEDATE'].dt.date <= pd.to_datetime(to_date).date())
+            ss_df = ss_df.loc[mask]
+            state_agg = ss_df.groupby('STATE', as_index=False)['CNT'].sum().sort_values('CNT', ascending=False)
+            return state_agg
+        except Exception:
+            return pd.DataFrame(columns=['STATE','CNT'])
+
+def read_staff_patient_ratio():
+    candidates = ["STAFF_PATIENT_RATIO", "STAFF_PATIENT"]
+    for tab in candidates:
+        try:
+            q = f"SELECT * FROM {tab} FETCH FIRST 1 ROWS ONLY"
+            df = pd.read_sql(q, conn)
+            if not df.empty:
+                return df
+        except Exception:
+            continue
+    return None
+
+# Reports tab functions
+def search_mrns(prefix: str, limit: int = 100):
+    """Return up to `limit` MRNs from NOTESDATA that match the prefix (case-insensitive)."""
+    if prefix is None:
+        return []
+    safe_prefix = safe_sql(prefix.strip())
+    if safe_prefix == "":
+        return []
+    like_val = f"%{safe_prefix}%"
+    q = f"SELECT DISTINCT MRN FROM NOTESDATA WHERE MRN LIKE '{like_val}' AND ROWNUM <= {limit} ORDER BY MRN"
+    try:
+        df = pd.read_sql(q, conn)
+        return df['MRN'].dropna().tolist() if not df.empty else []
+    except Exception:
+        return []
+
+def fetch_reports_for_mrn(mrn: str):
+    """Return DataFrame of reports for a given MRN."""
+    if not mrn:
+        return pd.DataFrame()
+    safe_mrn = safe_sql(mrn)
+    q = (
+        "SELECT ACCESSION_NUM, NOTENAME, VISITTYPE, VISITDATE, DONEBY, DEPTNAME, NOTEDATA "
+        "FROM NOTESDATA "
+        f"WHERE MRN = '{safe_mrn}' "
+        "ORDER BY NVL(VISITDATE, TO_DATE('1900-01-01','YYYY-MM-DD')) DESC"
+    )
+    try:
+        df = pd.read_sql(q, conn)
+        expected_cols = ['ACCESSION_NUM','NOTENAME','VISITTYPE','VISITDATE','DONEBY','DEPTNAME','NOTEDATA']
+        for c in expected_cols:
+            if c not in df.columns:
+                df[c] = None
+        return df[expected_cols]
+    except Exception:
+        return pd.DataFrame(columns=['ACCESSION_NUM','NOTENAME','VISITTYPE','VISITDATE','DONEBY','DEPTNAME','NOTEDATA'])
+
+def build_report_label(row):
+    """Produce a friendly label for a report in multi-select: accession | name | date"""
+    acc = str(row.get('ACCESSION_NUM','')) if pd.notna(row.get('ACCESSION_NUM',None)) else ''
+    name = row.get('NOTENAME','') if pd.notna(row.get('NOTENAME',None)) else ''
+    date_val = row.get('VISITDATE',None)
+    if pd.isna(date_val) or date_val is None:
+        date_str = ''
+    else:
+        if isinstance(date_val, str):
+            date_str = date_val
+        elif isinstance(date_val, (datetime, pd.Timestamp)):
+            date_str = date_val.strftime('%Y-%m-%d')
+        else:
+            date_str = str(date_val)
+    label = f"{acc} | {name} | {date_str}"
+    return label
+
+def create_zip_of_reports(reports_df: pd.DataFrame, selected_accessions: list):
+    """Create a ZIP in-memory with one .html file per selected accession. Returns bytes."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+        for acc in selected_accessions:
+            row = reports_df[reports_df['ACCESSION_NUM'] == acc]
+            if row.empty:
+                continue
+            html_content = row.iloc[0].get('NOTEDATA', '') or ''
+            fname = f"{str(acc)}.html"
+            zf.writestr(fname, html_content)
+    buf.seek(0)
+    return buf.read()
+
+# Surgery Details Functions
+def load_surgery_metrics(from_date, to_date, dept_name, surgeon_id):
+    surg_dept_filter = "1=1" if dept_name in (None, "", "All") else f"D.DEPTNAME = '{safe_sql(dept_name)}'"
+    
+    # Fixed hospital filter
+    if selected_hospital in (None, "", "All Hospitals"):
+        surg_hosp_filter = "1=1"
+    else:
+        surg_hosp_filter = f"S.HOSPITALID = '{safe_sql(selected_hospital)}'"
+    
+    surg_date_cond = f"S.SURGERYDATE BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD') AND TO_DATE('{to_date}', 'YYYY-MM-DD')"
+
+    # total surgeries
+    try:
+        total_q = (
+            "SELECT COUNT(*) AS CNT FROM SURGERY S JOIN DEPARTMENT D ON S.DEPTCODE = D.DEPTCODE AND S.HOSPITALID = D.HOSPITALID "
+            f"WHERE {surg_date_cond} AND {surg_dept_filter} AND {surg_hosp_filter}"
+        )
+        total = int(pd.read_sql(total_q, conn)["CNT"].iloc[0])
+    except Exception:
+        total = 0
+
+    # by surgeon
+    if surgeon_id:
+        try:
+            bydoc_q = (
+                "SELECT COUNT(*) AS CNT FROM SURGERY S JOIN DEPARTMENT D ON S.DEPTCODE = D.DEPTCODE AND S.HOSPITALID = D.HOSPITALID "
+                f"WHERE {surg_date_cond} AND {surg_dept_filter} AND {surg_hosp_filter} AND S.SURGEONID = '{safe_sql(surgeon_id)}'"
+            )
+            bydoc = int(pd.read_sql(bydoc_q, conn)["CNT"].iloc[0])
+        except Exception:
+            bydoc = 0
+    else:
+        bydoc = None
+
+    # top surgery type
+    try:
+        top_q = (
+            "SELECT NVL(SURGERYTYPE,'UNKNOWN') AS SURGERYTYPE, COUNT(*) AS CNT "
+            "FROM SURGERY S JOIN DEPARTMENT D ON S.DEPTCODE = D.DEPTCODE AND S.HOSPITALID = D.HOSPITALID "
+            f"WHERE {surg_date_cond} AND {surg_dept_filter} AND {surg_hosp_filter} "
+            "GROUP BY NVL(SURGERYTYPE,'UNKNOWN') ORDER BY CNT DESC"
+        )
+        top_df = pd.read_sql(top_q, conn)
+        top_type = top_df["SURGERYTYPE"].iloc[0] if not top_df.empty else "N/A"
+    except Exception:
+        top_type = "N/A"
+
+    days = (to_date - from_date).days + 1
+    daily_avg = (total / days) if days > 0 else 0.0
+
+    return {"total": total, "bydoc": bydoc, "top_type": top_type, "daily_avg": daily_avg}
+
+# ========================================
+# CUSTOM METRICS MANAGER
+# ========================================
+class CustomMetricsManager:
+    def __init__(self, config_dir="custom_metrics"):
+        """Initialize the custom metrics manager"""
+        self.config_dir = Path(config_dir)
+        self.config_dir.mkdir(exist_ok=True)
+        self.metrics_file = self.config_dir / "saved_metrics.json"
+        self.templates_dir = self.config_dir / "templates"
+        self.templates_dir.mkdir(exist_ok=True)
+        
+    def parse_metric_file(self, file_content):
+        """Parse a metric definition file"""
+        lines = file_content.strip().split('\n')
+        metric_def = {
+            'name': '',
+            'icon': '📊',
+            'color': 'kpi-grad-1',
+            'description': '',
+            'query': '',
+            'type': 'single_value',  # NEW: default type
+            'created_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        query_started = False
+        query_lines = []
+        
+        for line in lines:
+            line = line.strip()
+            
+            if query_started:
+                query_lines.append(line)
+            elif line.startswith('METRIC_NAME:'):
+                metric_def['name'] = line.split('METRIC_NAME:', 1)[1].strip()
+            elif line.startswith('METRIC_ICON:'):
+                metric_def['icon'] = line.split('METRIC_ICON:', 1)[1].strip()
+            elif line.startswith('METRIC_COLOR:'):
+                metric_def['color'] = line.split('METRIC_COLOR:', 1)[1].strip()
+            elif line.startswith('METRIC_TYPE:'):  # NEW: optional type specification
+                metric_def['type'] = line.split('METRIC_TYPE:', 1)[1].strip().lower()
+            elif line.startswith('DESCRIPTION:'):
+                metric_def['description'] = line.split('DESCRIPTION:', 1)[1].strip()
+            elif line.startswith('QUERY:'):
+                query_started = True
+        
+        metric_def['query'] = '\n'.join(query_lines).strip()
+        
+        if not metric_def['name']:
+            raise ValueError("METRIC_NAME is required")
+        if not metric_def['query']:
+            raise ValueError("QUERY is required")
+            
+        return metric_def
+    
+    def save_metric(self, metric_def):
+        """Save a metric definition to persistent storage"""
+        metrics = self.load_saved_metrics()
+        metric_id = metric_def['name'].lower().replace(' ', '_')
+        metrics[metric_id] = metric_def
+        
+        with open(self.metrics_file, 'w') as f:
+            json.dump(metrics, f, indent=2)
+        
+        return metric_id
+    
+    def load_saved_metrics(self):
+        """Load all saved metrics from storage"""
+        if not self.metrics_file.exists():
+            return {}
+        
+        try:
+            with open(self.metrics_file, 'r') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    
+    def delete_metric(self, metric_id):
+        """Delete a saved metric"""
+        metrics = self.load_saved_metrics()
+        if metric_id in metrics:
+            del metrics[metric_id]
+            with open(self.metrics_file, 'w') as f:
+                json.dump(metrics, f, indent=2)
+            return True
+        return False
+    
+    def execute_metric_query(self, query, conn, from_date=None, to_date=None, 
+                            selected_hospital=None, selected_dept=None):
+        """
+        FIXED: Execute a metric query with parameter substitution
+        Now supports both single values and tables
+        """
+        if from_date:
+            query = query.replace('{from_date}', str(from_date))
+        if to_date:
+            query = query.replace('{to_date}', str(to_date))
+        if selected_hospital:
+            query = query.replace('{hospital}', str(selected_hospital))
+        if selected_dept:
+            query = query.replace('{dept}', str(selected_dept))
+        
+        try:
+            result = pd.read_sql(query, conn)
+            
+            # FIXED: Check if this is a table result (multiple rows or columns)
+            if len(result) > 1 or len(result.columns) > 1:
+                return result  # Return DataFrame for tables
+            
+            # Single value result
+            if 'VALUE' in result.columns:
+                return result['VALUE'].iloc[0]
+            else:
+                return result.iloc[0, 0]
+        except Exception as e:
+            raise Exception(f"Query execution failed: {str(e)}")
+    
+    def create_sample_template(self):
+        """FIXED: Create a sample metric template file with both types"""
+        sample = """METRIC_NAME: Total Active Patients
+                    METRIC_ICON: 👥
+                    METRIC_COLOR: kpi-grad-1
+                    METRIC_TYPE: single_value
+                    DESCRIPTION: Count of all active patients in the system
+                    QUERY:
+                        SELECT COUNT(*) as VALUE
+                        FROM PATIENT
+                        WHERE STATUS = 'A'
+                        ---
+
+                    Example for TABLE metric:
+
+                    METRIC_NAME: Top Departments by Patient Count
+                    METRIC_ICON: 🏥
+                    METRIC_COLOR: kpi-grad-2
+                    METRIC_TYPE: table
+                    DESCRIPTION: Shows patient distribution across departments
+                    QUERY:
+                        SELECT 
+                            DEPTNAME as Department,
+                            COUNT(*) as Patient_Count,
+                            ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 2) as Percentage
+                        FROM INPATIENT i
+                        JOIN DEPARTMENT d ON i.DEPTCODE = d.DEPTCODE
+                        WHERE i.DOA BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD') 
+                                        AND TO_DATE('{to_date}', 'YYYY-MM-DD')
+                        GROUP BY DEPTNAME
+                        ORDER BY Patient_Count DESC
+                        FETCH FIRST 10 ROWS ONLY
+                        """
+        template_file = self.templates_dir / "sample_metric.txt"
+        with open(template_file, 'w') as f:
+            f.write(sample)
+        return template_file
+
+# ========================================
+# RENDER FUNCTION - FIXED FOR PERMISSIONS
+# ========================================
+
+def render_custom_metrics_ui(conn, from_date, to_date, selected_hospital, selected_dept):
+    """
+    FIXED: Render the custom metrics UI in Streamlit
+    Now supports role-based access:
+    - Admins: Can view, add, and manage metrics
+    - Users: Can only view metrics
+    """
+    #st.header("🎯 Custom Metrics Manager")
+   
+    manager = CustomMetricsManager()
+    is_admin = st.session_state.get("role") == "admin"
+   
+    # FIXED: Show different tabs based on role
+    if is_admin:
+        tab1, tab2, tab3 = st.tabs(["📊 View Metrics", "➕ Add New Metric", "⚙️ Manage Metrics"])
+    else:
+        # Non-admin users only see View Metrics - create a single tab list
+        tabs_list = st.tabs(["📊 View Metrics"])
+        tab1 = tabs_list[0]
+   
+    # ============================================
+    # TAB 1: VIEW METRICS (Available to all users)
+    # ============================================
+    with tab1:
+        # Show info for non-admin users
+        if not is_admin:
+            st.info("💡 Only administrators can add or manage custom metrics. Contact your admin to create new metrics.")
+    
+        st.subheader("Active Custom Metrics")
+    
+        saved_metrics = manager.load_saved_metrics()
+    
+        if not saved_metrics:
+            if is_admin:
+                st.info("📭 No custom metrics saved yet. Go to 'Add New Metric' tab to create one!")
+            else:
+                st.info("📭 No custom metrics available yet. Ask an administrator to create metrics.")
+        else:
+            # FIXED: Add a "Refresh Metrics" button to control when queries execute
+            if st.button("🔄 Refresh All Metrics", key="refresh_metrics_btn", type="primary"):
+                st.session_state.metrics_refreshed = True
+            
+            if st.session_state.get("metrics_refreshed", False):
+                metrics_per_row = 3
+                metric_items = list(saved_metrics.items())
+            
+                for i in range(0, len(metric_items), metrics_per_row):
+                    cols = st.columns(metrics_per_row)
+                
+                    for j in range(metrics_per_row):
+                        idx = i + j
+                        if idx >= len(metric_items):
+                            break
+                    
+                        metric_id, metric_def = metric_items[idx]
+                    
+                        with cols[j]:
+                            with st.container():
+                                st.markdown(f"### {metric_def['icon']} {metric_def['name']}")
+                            
+                                try:
+                                    # Show loading spinner for each metric
+                                    with st.spinner(f"Loading {metric_def['name']}..."):
+                                        result = manager.execute_metric_query(
+                                            metric_def['query'],
+                                            conn,
+                                            from_date=from_date,
+                                            to_date=to_date,
+                                            selected_hospital=selected_hospital,
+                                            selected_dept=selected_dept
+                                        )
+                                
+                                    # Check if result is a DataFrame (table) or single value
+                                    if isinstance(result, pd.DataFrame):
+                                        st.caption(metric_def['description'])
+                                        st.dataframe(result, use_container_width=True, height=300)
+                                        st.caption(f"📊 {len(result)} rows returned")
+                                    else:
+                                        # Single value
+                                        if isinstance(result, (int, float)):
+                                            if isinstance(result, float):
+                                                display_value = f"{result:,.2f}"
+                                            else:
+                                                display_value = f"{result:,}"
+                                        else:
+                                            display_value = str(result)
+                                    
+                                        st.metric(label=metric_def['name'], value=display_value)
+                                        st.caption(metric_def['description'])
+                                
+                                except Exception as e:
+                                    st.error(f"Error: {str(e)}")
+                                    st.caption(metric_def['description'])
+            else:
+                st.info("👆 Click 'Refresh All Metrics' button above to load custom metrics data.")
+                st.write(f"**{len(saved_metrics)} custom metrics** available")
+   
+    # ============================================
+    # TAB 2 & 3: ADD NEW METRIC & MANAGE (Admin only)
+    # ============================================
+    if is_admin:
+        with tab2:
+            st.subheader("➕ Create New Custom Metric")
+           
+            st.info("""
+            📝 **How to create a metric:**
+            1. Upload a text file with metric definition, OR
+            2. Use the form below to create one
+           
+            **Metric Types:**
+            - **Single Value**: Returns one number (e.g., COUNT, SUM, AVG)
+            - **Table**: Returns multiple rows of data
+           
+            **Supported placeholders in queries:**
+            - `{from_date}` - Start date from filters
+            - `{to_date}` - End date from filters
+            - `{hospital}` - Selected hospital
+            - `{dept}` - Selected department
+            """)
+           
+            st.markdown("#### Option 1: Upload Metric File")
+            uploaded_file = st.file_uploader("Upload metric definition (.txt)", type=['txt'], key="metric_upload")
+           
+            if uploaded_file:
+                try:
+                    file_content = uploaded_file.read().decode('utf-8')
+                    metric_def = manager.parse_metric_file(file_content)
+                   
+                    st.success(f"✅ Parsed metric: **{metric_def['name']}**")
+                    st.json(metric_def)
+                   
+                    if st.button("💾 Save This Metric", key="save_uploaded"):
+                        metric_id = manager.save_metric(metric_def)
+                        st.success(f"✅ Metric saved with ID: {metric_id}")
+                        st.balloons()
+                        st.rerun()
+                       
+                except Exception as e:
+                    st.error(f"❌ Error parsing file: {str(e)}")
+           
+            st.markdown("---")
+            st.markdown("#### Option 2: Create Using Form")
+           
+            with st.form("new_metric_form"):
+                metric_name = st.text_input("Metric Name*", placeholder="e.g., Total Revenue")
+               
+                col1, col2 = st.columns(2)
+                with col1:
+                    metric_icon = st.text_input("Icon (emoji)", value="📊")
+                with col2:
+                    color_options = ["kpi-grad-1", "kpi-grad-2", "kpi-grad-3", "kpi-grad-4",
+                                    "kpi-grad-5", "kpi-grad-6", "kpi-grad-7", "kpi-grad-8"]
+                    metric_color = st.selectbox("Color Theme", color_options)
+               
+                metric_type = st.radio(
+                    "Metric Type*",
+                    options=["Single Value", "Table"],
+                    help="Single Value: Shows one number. Table: Shows multiple rows of data."
+                )
+               
+                metric_desc = st.text_area("Description", placeholder="What does this metric measure?")
+               
+                if metric_type == "Single Value":
+                    query_placeholder = """SELECT COUNT(*) as VALUE
+                                            FROM YOUR_TABLE
+                                            WHERE DATE_COLUMN BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD')
+                                            AND TO_DATE('{to_date}', 'YYYY-MM-DD')"""
+                    query_help = "Query must return a single value. Use column name 'VALUE' or it will use first column."
+                else:
+                    query_placeholder = """SELECT
+                                                COLUMN1,
+                                                COLUMN2,
+                                                COUNT(*) as COUNT
+                                            FROM YOUR_TABLE
+                                            WHERE DATE_COLUMN BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD')
+                                            AND TO_DATE('{to_date}', 'YYYY-MM-DD')
+                                            GROUP BY COLUMN1, COLUMN2
+                                            ORDER BY COUNT DESC"""
+                    query_help = "Query can return multiple rows and columns. Results will be displayed as a table."
+               
+                metric_query = st.text_area(
+                    "SQL Query*",
+                    placeholder=query_placeholder,
+                    height=200
+                )
+               
+                st.caption(f"⚠️ {query_help}")
+               
+                submitted = st.form_submit_button("💾 Save Metric")
+               
+                if submitted:
+                    if not metric_name or not metric_query:
+                        st.error("❌ Metric Name and Query are required!")
+                    else:
+                        metric_def = {
+                            'name': metric_name,
+                            'icon': metric_icon,
+                            'color': metric_color,
+                            'description': metric_desc,
+                            'query': metric_query,
+                            'type': metric_type.lower().replace(" ", "_"),
+                            'created_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        }
+                       
+                        try:
+                            metric_id = manager.save_metric(metric_def)
+                            st.success(f"✅ Metric '{metric_name}' saved successfully!")
+                            st.balloons()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Error saving metric: {str(e)}")
+           
+            st.markdown("---")
+            st.markdown("#### 📥 Download Sample Template")
+            if st.button("Download Sample Metric Template"):
+                template_file = manager.create_sample_template()
+                with open(template_file, 'r') as f:
+                    st.download_button(
+                        label="📄 Download sample_metric.txt",
+                        data=f.read(),
+                        file_name="sample_metric.txt",
+                        mime="text/plain"
+                    )
+       
+        # ============================================
+        # TAB 3: MANAGE METRICS (Admin only)
+        # ============================================
+        with tab3:
+            st.subheader("⚙️ Manage Saved Metrics")
+           
+            saved_metrics = manager.load_saved_metrics()
+           
+            if not saved_metrics:
+                st.info("No metrics to manage.")
+            else:
+                for metric_id, metric_def in saved_metrics.items():
+                    with st.expander(f"{metric_def['icon']} {metric_def['name']}", expanded=False):
+                        st.markdown(f"**ID:** `{metric_id}`")
+                        st.markdown(f"**Type:** {metric_def.get('type', 'single_value').replace('_', ' ').title()}")
+                        st.markdown(f"**Description:** {metric_def['description']}")
+                        st.markdown(f"**Created:** {metric_def.get('created_date', 'N/A')}")
+                       
+                        st.code(metric_def['query'], language='sql')
+                       
+                        col1, col2, col3 = st.columns(3)
+                       
+                        with col1:
+                            if st.button("🧪 Test Query", key=f"test_{metric_id}"):
+                                try:
+                                    result = manager.execute_metric_query(
+                                        metric_def['query'],
+                                        conn,
+                                        from_date=from_date,
+                                        to_date=to_date,
+                                        selected_hospital=selected_hospital,
+                                        selected_dept=selected_dept
+                                    )
+                                   
+                                    if isinstance(result, pd.DataFrame):
+                                        st.success(f"✅ Table Result: {len(result)} rows")
+                                        st.dataframe(result)
+                                    else:
+                                        st.success(f"✅ Result: **{result}**")
+                                except Exception as e:
+                                    st.error(f"❌ Query failed: {str(e)}")
+                       
+                        with col2:
+                            file_content = f"""METRIC_NAME: {metric_def['name']}
+                                            METRIC_ICON: {metric_def['icon']}
+                                            METRIC_COLOR: {metric_def['color']}
+                                            METRIC_TYPE: {metric_def.get('type', 'single_value')}
+                                            DESCRIPTION: {metric_def['description']}
+                                            QUERY:
+                                            {metric_def['query']}
+                                            """
+                            st.download_button(
+                                label="📥 Download",
+                                data=file_content,
+                                file_name=f"{metric_id}.txt",
+                                mime="text/plain",
+                                key=f"download_{metric_id}"
+                            )
+                       
+                        with col3:
+                            if st.button("🗑️ Delete", key=f"delete_{metric_id}", type="secondary"):
+                                if manager.delete_metric(metric_id):
+                                    st.success(f"✅ Deleted {metric_def['name']}")
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Failed to delete")
+
+# ========================================
+# DISPLAY FUNCTION - FIXED FOR TABLES
+# ========================================
+def display_custom_metrics_row(conn, from_date, to_date, selected_hospital, selected_dept, kpi_card_html):
+    """
+    FIXED: Display custom metrics in a row
+    Now supports both single values and tables
+    """
+    manager = CustomMetricsManager()
+    saved_metrics = manager.load_saved_metrics()
+    
+    if saved_metrics:
+        st.markdown("---")
+        st.subheader("🎯 Custom Metrics")
+        
+        metrics_per_row = 4
+        metric_items = list(saved_metrics.items())
+        
+        for i in range(0, len(metric_items), metrics_per_row):
+            cols = st.columns(metrics_per_row)
+            
+            for j in range(metrics_per_row):
+                idx = i + j
+                if idx >= len(metric_items):
+                    break
+                
+                metric_id, metric_def = metric_items[idx]
+                
+                with cols[j]:
+                    try:
+                        result = manager.execute_metric_query(
+                            metric_def['query'],
+                            conn,
+                            from_date=from_date,
+                            to_date=to_date,
+                            selected_hospital=selected_hospital,
+                            selected_dept=selected_dept
+                        )
+                        
+                        # FIXED: Check if result is a DataFrame (table)
+                        if isinstance(result, pd.DataFrame):
+                            # For tables, show row count as the metric
+                            display_value = f"{len(result)} rows"
+                            st.markdown(
+                                kpi_card_html(
+                                    metric_def['name'],
+                                    display_value,
+                                    f"📊 {metric_def['description'][:30]}...",
+                                    metric_def['color'],
+                                    metric_def['icon']
+                                ),
+                                unsafe_allow_html=True
+                            )
+                            with st.expander("View Details"):
+                                st.dataframe(result, use_container_width=True)
+                        else:
+                            # Single value
+                            if isinstance(result, (int, float)):
+                                if isinstance(result, float):
+                                    display_value = f"{result:,.2f}"
+                                else:
+                                    display_value = f"{result:,}"
+                            else:
+                                display_value = str(result)
+                            
+                            st.markdown(
+                                kpi_card_html(
+                                    metric_def['name'],
+                                    display_value,
+                                    metric_def['description'],
+                                    metric_def['color'],
+                                    metric_def['icon']
+                                ),
+                                unsafe_allow_html=True
+                            )
+                        
+                    except Exception as e:
+                        st.markdown(
+                            kpi_card_html(
+                                metric_def['name'],
+                                "Error",
+                                str(e)[:50],
+                                "kpi-grad-5",
+                                "⚠️"
+                            ),
+                            unsafe_allow_html=True
+                        )
+
 # -------------------------
 # Tabs and rendering
 # -------------------------
@@ -2154,9 +2114,7 @@ with p4:
     #     kpi_card_html
     # )
     
-# ---- TAB 1: Operational Efficiency (Radiology + State-wise) ----
-# Replace the entire TAB 1 section (Operational Efficiency) with this fixed version:
-
+# ---- TAB 1: Operational Efficiency
 with tabs[1]:
     st.header("Operational Efficiency")
     st.subheader("📊 Category Hierarchy: CATEGORY → SUBCATG → SUBCATGL2")
@@ -2204,9 +2162,6 @@ with tabs[1]:
     
     # ============================================
     # LEVEL 1: CATEGORY VIEW
-    # ============================================
-        # ============================================
-    # LEVEL 1: CATEGORY VIEW + PDF DOWNLOAD
     # ============================================
     if st.session_state.view_level == 1:
         category_metrics = get_category_metrics(from_date, to_date, selected_category, selected_ordering_dept)
@@ -2485,8 +2440,6 @@ with tabs[3]:
     except Exception:
         st.info("No quality metrics source found.")
 
-
-
 # ---- Reports tab ----
 with tabs[4]:
     st.header("📑 Patient Reports Viewer")
@@ -2570,7 +2523,6 @@ with tabs[4]:
                     )
 
 # ---- Stats Tab ----
-# ---- Stats Tab ----
 with tabs[5]:
     st.header("📊 Patient Stats")
     
@@ -2584,8 +2536,7 @@ with tabs[5]:
     
     # Detailed breakdown tabs (NO KPI cards here)
     occ_tab1, occ_tab2, occ_tab3 = st.tabs(["📈 Daily Trend", "🏥 By Department", "📍 By Location"])
-    
-    # TAB 1: Daily Trend
+
     # TAB 1: Daily Trend
 with occ_tab1:
     st.markdown("#### Daily Occupancy Trend")
@@ -2896,17 +2847,47 @@ with occ_tab1:
         ).properties(height=400)
         st.altair_chart(chart_trend, use_container_width=True)
 
-# ---- Surgery Details tab ----
-# ────────────────────── ENHANCED SURGERY DETAILS TAB ──────────────────────
-# ---- Surgery Details tab – UPGRADED & CLEAN ----
-# ---- Surgery Details tab – FINAL FIXED & SUPERCHARGED ----
-# ---- Surgery Details tab – FINAL FIXED & SUPERCHARGED ----
-# ---- Surgery Details tab – FIXED WITH CORRECT JOIN ----
-# ---- Surgery Details tab – FIXED WITH SURGERY_PERSONNEL ----
+# ---- TAB 6: Custom Metrics Manager ----
+with tabs[6]:
+    st.header("Custom Metrics Manager")
 
-    # # ---- Surgery Details tab – FIXED WITH STAFFID FALLBACK ----
-# ---- Surgery Details tab – COMPLETE WITH ALL STAFF ROLES ----
-# ---- Surgery Details tab – FIXED WITH DEPARTMENT FILTER ----
+    try:
+        custom_dir = Path("custom_metrics")
+        templates_dir = custom_dir / "templates"
+        metrics_file = custom_dir / "saved_metrics.json"
+
+        custom_dir.mkdir(exist_ok=True)
+        templates_dir.mkdir(exist_ok=True)
+
+        # Ensure the JSON file exists (create empty if not)
+        if not metrics_file.exists():
+            metrics_file.write_text("{}", encoding="utf-8")
+    except Exception as e:
+        st.error(f"Failed to initialize custom metrics folder: {e}")
+        st.stop()
+
+    try:
+        if conn.closed:
+            conn = get_conn()
+    except:
+        try:
+            conn = get_conn()
+        except Exception as db_e:
+            st.error(f"Cannot reconnect to database: {db_e}")
+            st.stop()
+    try:
+        render_custom_metrics_ui(
+            conn=conn,
+            from_date=from_date,
+            to_date=to_date,
+            selected_hospital=selected_hospital,
+            selected_dept=selected_dept
+        )
+    except Exception as e:
+        st.error("Custom Metrics failed to load:")
+        st.exception(e)
+
+# ---- Surgery Details tab ----
 with tabs[7]:
     st.header("Surgery Details")
 
@@ -3246,64 +3227,6 @@ Query Filters Applied:
             file_name=f"Surgery_Register_{from_date}_to_{to_date}.csv",
             mime="text/csv"
         )
-
-    # ---- TAB 7: Custom Metrics Manager ----
-# ---- TAB 7: Custom Metrics Manager ----
-# ---- TAB 7: Custom Metrics Manager (FIXED & ROBUST) ----
-with tabs[6]:
-    st.header("Custom Metrics Manager")
-
-    # ==================================================================
-    # 1. EARLY SETUP: Create folders + ensure JSON exists (MUST be first!)
-    # ==================================================================
-    try:
-        custom_dir = Path("custom_metrics")
-        templates_dir = custom_dir / "templates"
-        metrics_file = custom_dir / "saved_metrics.json"
-
-        custom_dir.mkdir(exist_ok=True)
-        templates_dir.mkdir(exist_ok=True)
-
-        # Ensure the JSON file exists (create empty if not)
-        if not metrics_file.exists():
-            metrics_file.write_text("{}", encoding="utf-8")
-    except Exception as e:
-        st.error(f"Failed to initialize custom metrics folder: {e}")
-        st.stop()
-
-    # ==================================================================
-    # 2. Re-open DB connection if closed (critical!)
-    # ==================================================================
-    try:
-        if conn.closed:
-            conn = get_conn()
-    except:
-        try:
-            conn = get_conn()
-        except Exception as db_e:
-            st.error(f"Cannot reconnect to database: {db_e}")
-            st.stop()
-
-    # ==================================================================
-    # 3. Optional: Remove forced admin (only for testing)
-    # ==================================================================
-    # Remove this line in production:
-    # st.session_state["role"] = "admin"
-
-    # ==================================================================
-    # 4. Finally render the UI with fresh connection
-    # ==================================================================
-    try:
-        render_custom_metrics_ui(
-            conn=conn,
-            from_date=from_date,
-            to_date=to_date,
-            selected_hospital=selected_hospital,
-            selected_dept=selected_dept
-        )
-    except Exception as e:
-        st.error("Custom Metrics failed to load:")
-        st.exception(e)
 
 # Close DB connection
 try:
