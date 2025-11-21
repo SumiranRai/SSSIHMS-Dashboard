@@ -24,7 +24,7 @@ import streamlit.components.v1 as components
 import json
 import os
 from pathlib import Path
-
+from dotenv import load_dotenv
 # ────────────────────── ADD THIS BLOCK ──────────────────────
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
@@ -222,69 +222,83 @@ def render_custom_metrics_ui(conn, from_date, to_date, selected_hospital, select
     # ============================================
     # TAB 1: VIEW METRICS (Available to all users)
     # ============================================
+    
+    # ============================================
+# TAB 1: VIEW METRICS (Available to all users)
+# ============================================
     with tab1:
         # Show info for non-admin users
         if not is_admin:
             st.info("💡 Only administrators can add or manage custom metrics. Contact your admin to create new metrics.")
-       
+    
         st.subheader("Active Custom Metrics")
-       
+    
         saved_metrics = manager.load_saved_metrics()
-       
+    
         if not saved_metrics:
             if is_admin:
                 st.info("📭 No custom metrics saved yet. Go to 'Add New Metric' tab to create one!")
             else:
                 st.info("📭 No custom metrics available yet. Ask an administrator to create metrics.")
         else:
-            metrics_per_row = 3
-            metric_items = list(saved_metrics.items())
-           
-            for i in range(0, len(metric_items), metrics_per_row):
-                cols = st.columns(metrics_per_row)
-               
-                for j in range(metrics_per_row):
-                    idx = i + j
-                    if idx >= len(metric_items):
-                        break
-                   
-                    metric_id, metric_def = metric_items[idx]
-                   
-                    with cols[j]:
-                        with st.container():
-                            st.markdown(f"### {metric_def['icon']} {metric_def['name']}")
-                           
-                            try:
-                                result = manager.execute_metric_query(
-                                    metric_def['query'],
-                                    conn,
-                                    from_date=from_date,
-                                    to_date=to_date,
-                                    selected_hospital=selected_hospital,
-                                    selected_dept=selected_dept
-                                )
-                               
-                                # Check if result is a DataFrame (table) or single value
-                                if isinstance(result, pd.DataFrame):
-                                    st.caption(metric_def['description'])
-                                    st.dataframe(result, use_container_width=True, height=300)
-                                    st.caption(f"📊 {len(result)} rows returned")
-                                else:
-                                    # Single value
-                                    if isinstance(result, (int, float)):
-                                        if isinstance(result, float):
-                                            display_value = f"{result:,.2f}"
-                                        else:
-                                            display_value = f"{result:,}"
+            # FIXED: Add a "Refresh Metrics" button to control when queries execute
+            if st.button("🔄 Refresh All Metrics", key="refresh_metrics_btn", type="primary"):
+                st.session_state.metrics_refreshed = True
+            
+            if st.session_state.get("metrics_refreshed", False):
+                metrics_per_row = 3
+                metric_items = list(saved_metrics.items())
+            
+                for i in range(0, len(metric_items), metrics_per_row):
+                    cols = st.columns(metrics_per_row)
+                
+                    for j in range(metrics_per_row):
+                        idx = i + j
+                        if idx >= len(metric_items):
+                            break
+                    
+                        metric_id, metric_def = metric_items[idx]
+                    
+                        with cols[j]:
+                            with st.container():
+                                st.markdown(f"### {metric_def['icon']} {metric_def['name']}")
+                            
+                                try:
+                                    # Show loading spinner for each metric
+                                    with st.spinner(f"Loading {metric_def['name']}..."):
+                                        result = manager.execute_metric_query(
+                                            metric_def['query'],
+                                            conn,
+                                            from_date=from_date,
+                                            to_date=to_date,
+                                            selected_hospital=selected_hospital,
+                                            selected_dept=selected_dept
+                                        )
+                                
+                                    # Check if result is a DataFrame (table) or single value
+                                    if isinstance(result, pd.DataFrame):
+                                        st.caption(metric_def['description'])
+                                        st.dataframe(result, use_container_width=True, height=300)
+                                        st.caption(f"📊 {len(result)} rows returned")
                                     else:
-                                        display_value = str(result)
-                                   
-                                    st.metric(label=metric_def['name'], value=display_value)
+                                        # Single value
+                                        if isinstance(result, (int, float)):
+                                            if isinstance(result, float):
+                                                display_value = f"{result:,.2f}"
+                                            else:
+                                                display_value = f"{result:,}"
+                                        else:
+                                            display_value = str(result)
+                                    
+                                        st.metric(label=metric_def['name'], value=display_value)
+                                        st.caption(metric_def['description'])
+                                
+                                except Exception as e:
+                                    st.error(f"Error: {str(e)}")
                                     st.caption(metric_def['description'])
-                               
-                            except Exception as e:
-                                st.error(f"Error: {str(e)}")
-                                st.caption(metric_def['description'])
+            else:
+                st.info("👆 Click 'Refresh All Metrics' button above to load custom metrics data.")
+                st.write(f"**{len(saved_metrics)} custom metrics** available")
    
     # ============================================
     # TAB 2 & 3: ADD NEW METRIC & MANAGE (Admin only)
@@ -586,6 +600,66 @@ def inject_modern_css():
     }
     /* ================================================== */
     
+                /* ========== MOBILE RESPONSIVENESS ========== */
+    @media (max-width: 768px) {
+        .kpi-card {
+            padding: 16px 12px;
+            margin-bottom: 12px;
+        }
+        
+        .kpi-value {
+            font-size: 28px;
+        }
+        
+        .kpi-title {
+            font-size: 11px;
+        }
+        
+        .kpi-icon {
+            font-size: 28px;
+        }
+        
+        .section-header h2 {
+            font-size: 20px;
+        }
+        
+        .breadcrumb {
+            padding: 10px 16px;
+            font-size: 12px;
+        }
+        
+        /* Stack columns on mobile */
+        .stColumns {
+            flex-direction: column;
+        }
+        
+        /* Adjust button sizes */
+        .stButton button {
+            font-size: 14px;
+            padding: 8px 16px;
+        }
+        
+        /* Make tables scrollable */
+        .dataframe {
+            overflow-x: auto;
+        }
+    }
+    
+    @media (max-width: 480px) {
+        .kpi-card {
+            padding: 12px 8px;
+        }
+        
+        .kpi-value {
+            font-size: 24px;
+        }
+        
+        .section-header {
+            padding: 16px 20px;
+        }
+    }
+    /* ============================================= */
+                
     /* Global */
     .main { 
         background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); 
@@ -889,19 +963,137 @@ if "authenticated" not in st.session_state or not st.session_state.authenticated
 # -------------------------
 # Oracle connection helper
 # -------------------------
-def get_conn():
-    return oracledb.connect(
-        user="hisapp",
-        password="his@2025",
-        dsn="192.168.21.6:1521/hisdb"
-    )
+# -------------------------
+# Oracle connection helper with connection pooling
+# -------------------------
 
+# Load environment variables (create .env file with DB credentials)
+load_dotenv()
+
+# Initialize connection pool (performance optimization)
+@st.cache_resource
+def init_connection_pool():
+    """Initialize Oracle connection pool for better performance"""
+    try:
+        pool = oracledb.create_pool(
+            user=os.getenv("DB_USER", "hisapp"),
+            password=os.getenv("DB_PASSWORD", "his@2025"),
+            dsn=os.getenv("DB_DSN", "192.168.21.6:1521/hisdb"),
+            min=2,
+            max=10,
+            increment=1,
+            getmode=oracledb.POOL_GETMODE_WAIT
+        )
+        return pool
+    except Exception as e:
+        st.error(f"Failed to create connection pool: {e}")
+        st.stop()
+
+# Get connection from pool
+def get_conn():
+    """Get connection from pool"""
+    pool = init_connection_pool()
+    return pool.acquire()
+
+# Initialize main connection
 try:
     conn = get_conn()
 except Exception as e:
     st.error(f"Failed to connect to Oracle DB: {e}")
     st.stop()
 
+# -------------------------
+# Data Validation Functions
+# -------------------------
+def validate_date_range(from_date, to_date):
+    """Validate date range inputs"""
+    if from_date > to_date:
+        st.error("❌ Start date cannot be after end date!")
+        return False
+    
+    days_diff = (to_date - from_date).days
+    
+    if days_diff > 365:
+        st.warning(f"⚠️ Date range is {days_diff} days ({days_diff/30:.1f} months). Large ranges may affect performance.")
+        
+    if days_diff == 0:
+        st.info("ℹ️ You've selected a single day.")
+    
+    return True
+
+def validate_filters(hospital, dept, from_date, to_date):
+    """Validate all filters before querying"""
+    if not validate_date_range(from_date, to_date):
+        return False
+    
+    # Add more validation as needed
+    return True
+
+# -------------------------
+# Data Export Functions
+# -------------------------
+def create_excel_download(df, filename, sheet_name='Data'):
+    """Create formatted Excel file for download"""
+    buffer = io.BytesIO()
+    
+    try:
+        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+            
+            workbook = writer.book
+            worksheet = writer.sheets[sheet_name]
+            
+            # Add formatting
+            header_format = workbook.add_format({
+                'bold': True,
+                'bg_color': '#0ea77c',
+                'font_color': 'white',
+                'border': 1
+            })
+            
+            # Format header row
+            for col_num, value in enumerate(df.columns.values):
+                worksheet.write(0, col_num, value, header_format)
+                
+                # Auto-adjust column width
+                column_len = max(df[value].astype(str).str.len().max(), len(value)) + 2
+                worksheet.set_column(col_num, col_num, min(column_len, 50))
+        
+        buffer.seek(0)
+        return buffer.getvalue()
+    except Exception as e:
+        st.error(f"Failed to create Excel file: {e}")
+        return None
+
+def create_csv_download(df):
+    """Create CSV for download"""
+    return df.to_csv(index=False).encode('utf-8')
+
+def export_data_options(df, base_filename):
+    """Unified export UI component"""
+    st.markdown("#### 📥 Export Data")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        csv_data = create_csv_download(df)
+        st.download_button(
+            label="📄 Download CSV",
+            data=csv_data,
+            file_name=f"{base_filename}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+    
+    with col2:
+        excel_data = create_excel_download(df, base_filename)
+        if excel_data:
+            st.download_button(
+                label="📊 Download Excel",
+                data=excel_data,
+                file_name=f"{base_filename}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
 # -------------------------
 # Sidebar Navigation (matching admin panel design)
 # -------------------------
@@ -1137,7 +1329,7 @@ if load_data:
 
 # For first visit, auto-load and show info message
 if st.session_state.dashboard_first_load:
-    st.info("ℹ️ Dashboard loaded with default filters (your hospital, current month). Change filters and click **'Load Data'** to refresh.")
+    #st.info("ℹ️ Dashboard loaded with default filters (your hospital, current month). Change filters and click **'Load Data'** to refresh.")
     st.session_state.dashboard_first_load = False
 
 # Show message if data not loaded yet (only after first load)
@@ -1828,8 +2020,9 @@ def build_category_pdf(category, from_date, to_date, ordering_dept):
 # Tabs and rendering
 # -------------------------
 tabs = st.tabs(["🏠 General KPIs", "⚡ Operational Efficiency", "💰 Financial", 
-                "✅ Quality & Safety", "🩺 Surgery Details", "📄 Reports", 
-                "📊 Stats", "🎯 Custom Metrics"])  # Added new tab
+                "✅ Quality & Safety", "📄 Reports", "📊 Stats", "🎯 Custom Metrics",
+                "🩺 Surgery Details"
+                ])  # Added new tab
 
 # ---- TAB 0: General KPIs ----
 with tabs[0]:
@@ -2318,161 +2511,10 @@ with tabs[3]:
     except Exception:
         st.info("No quality metrics source found.")
 
-# ---- Surgery Details tab ----
-# ────────────────────── ENHANCED SURGERY DETAILS TAB ──────────────────────
-# ---- Surgery Details tab – UPGRADED & CLEAN ----
-# ---- Surgery Details tab – FINAL FIXED & SUPERCHARGED ----
-with tabs[4]:
-    st.header("Surgery Details")
 
-    # Build surgeon filter (if any)
-    surgeon_filter = ""
-    if selected_surgeon_id:
-        surgeon_filter = f"AND EXISTS (SELECT 1 FROM SURGERY_PERSONNEL sp WHERE sp.SURGERYID = s.SURGERYID AND sp.STAFFROLE = 'SURGEON' AND sp.STAFFID = '{safe_sql(selected_surgeon_id)}')"
-
-    # ROBUST JOIN: Trim + Upper case to match even messy data
-    surgery_q = f"""
-    SELECT
-        s.SURGERYID,
-        s.MRN,
-        s.SURGERYDATE,
-        s.OTNUMBER,
-        s.ANAESTHESIA,
-        NVL(TRIM(UPPER(sd.SURGERYNAME)), 'Unknown / Not Mapped') AS PROCEDURE_NAME,
-        NVL(sd.CATEGORY, 'Uncategorized') AS PROC_CATEGORY,
-        NVL(sd.SUBCATEGORY, '-') AS PROC_SUBCATEGORY,
-        NVL(surg_doc.STAFFNAME, 'Unknown Surgeon') AS SURGEON_NAME,
-        NVL(anes_doc.STAFFNAME, 'Not Recorded') AS ANAESTHETIST_NAME,
-        NVL(asst_doc.STAFFNAME, '-') AS ASSISTANT_NAME
-    FROM SURGERY s
-    LEFT JOIN SURGERY_DETAILS sd 
-      ON TRIM(UPPER(s.SURGERYTYPE)) = TRIM(UPPER(sd.SURGERYCODE))
-     AND (s.HOSPITALID = sd.HOSPITALID OR sd.HOSPITALID IS NULL)
-    -- Surgeon
-    LEFT JOIN SURGERY_PERSONNEL sp_surg ON s.SURGERYID = sp_surg.SURGERYID AND sp_surg.STAFFROLE = 'SURGEON'
-    LEFT JOIN STAFFMASTER surg_doc ON sp_surg.STAFFID = surg_doc.STAFFID
-    -- Anaesthetist
-    LEFT JOIN SURGERY_PERSONNEL sp_anes ON s.SURGERYID = sp_anes.SURGERYID AND sp_anes.STAFFROLE = 'ANAESTHETIST'
-    LEFT JOIN STAFFMASTER anes_doc ON sp_anes.STAFFID = anes_doc.STAFFID
-    -- Assistant (optional)
-    LEFT JOIN SURGERY_PERSONNEL sp_asst ON s.SURGERYID = sp_asst.SURGERYID AND sp_asst.STAFFROLE = 'ASSISTANT'
-    LEFT JOIN STAFFMASTER asst_doc ON sp_asst.STAFFID = asst_doc.STAFFID
-    WHERE s.SURGERYDATE BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD')
-                           AND TO_DATE('{to_date}', 'YYYY-MM-DD') + 0.99999
-      AND (s.HOSPITALID = '{safe_sql(selected_hospital)}' OR '{selected_hospital}' = 'All Hospitals')
-      {surgeon_filter}
-    ORDER BY s.SURGERYDATE DESC
-    """
-
-    try:
-        df = pd.read_sql(surgery_q, conn)
-    except Exception as e:
-        st.error(f"Query failed: {e}")
-        df = pd.DataFrame()
-
-    if df.empty:
-        st.warning("No surgeries found for the selected filters.")
-        st.stop()
-
-    total_surgeries = len(df)
-    days = (to_date - from_date).days + 1
-    daily_avg = round(total_surgeries / days, 1)
-
-    # KPIs
-    c1, c2, c3, c4, c5 = st.columns(5)
-    with c1:
-        st.markdown(kpi_card_html("Total Surgeries", f"{total_surgeries:,}", f"{from_date} → {to_date}", "kpi-grad-1", "Cut"), unsafe_allow_html=True)
-    with c2:
-        st.markdown(kpi_card_html("Daily Average", daily_avg, f"{days} days", "kpi-grad-2", "Calendar"), unsafe_allow_html=True)
-    with c3:
-        st.markdown(kpi_card_html("Unique Patients", df["MRN"].nunique(), "Distinct MRNs", "kpi-grad-3", "People"), unsafe_allow_html=True)
-    with c4:
-        st.markdown(kpi_card_html("OT Rooms Used", df["OTNUMBER"].nunique(), "Active theatres", "kpi-grad-4", "Door"), unsafe_allow_html=True)
-    with c5:
-        st.markdown(kpi_card_html("Active Surgeons", df["SURGEON_NAME"].nunique(), "Performed at least 1 surgery", "kpi-grad-5", "Doctor"), unsafe_allow_html=True)
-
-    st.markdown("---")
-
-    # === 1. TOP PROCEDURES (Now with real names!) ===
-    st.subheader("Top 20 Procedures Performed")
-    proc = df["PROCEDURE_NAME"].value_counts().head(20).reset_index()
-    proc.columns = ["Procedure", "Count"]
-
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        chart = alt.Chart(proc).mark_bar(color="#00d4aa").encode(
-            y=alt.Y("Procedure:N", sort="-x"),
-            x="Count:Q",
-            tooltip=["Procedure", "Count"]
-        ).properties(height=520)
-        st.altair_chart(chart, use_container_width=True)
-    with col2:
-        st.metric("Total Unique Procedures", len(df["PROCEDURE_NAME"].unique()))
-        st.metric("Most Common", proc.iloc[0]["Procedure"])
-        st.metric("Performed", f"{proc.iloc[0]['Count']:,} times")
-
-    # === 2. FULL PROCEDURE LIST (Downloadable) ===
-    with st.expander("Complete Procedure Master List (All Performed)", expanded=False):
-        full_proc = df["PROCEDURE_NAME"].value_counts().reset_index()
-        full_proc.columns = ["Procedure Name", "Times Performed"]
-        full_proc = full_proc.sort_values("Times Performed", ascending=False).reset_index(drop=True)
-        full_proc.insert(0, "Rank", range(1, len(full_proc)+1))
-
-        search = st.text_input("Search procedure", key="proc_search")
-        display = full_proc[full_proc["Procedure Name"].str.contains(search, case=False, na=False)] if search else full_proc
-
-        st.dataframe(display.style.format({"Times Performed": "{:,}"}), use_container_width=True, height=500)
-
-        csv = full_proc.to_csv(index=False).encode()
-        st.download_button("Download Full List (CSV)", data=csv,
-                           file_name=f"Procedures_{from_date}_to_{to_date}.csv", mime="text/csv")
-
-    st.markdown("---")
-
-    # === 3. DOCTORS LEADERBOARD (Surgeons + Anaesthetists) ===
-    st.subheader("Doctors Leaderboard")
-
-    tab_surg, tab_anes = st.tabs(["Surgeons", "Anaesthetists"])
-
-    with tab_surg:
-        surg_count = df["SURGEON_NAME"].value_counts().head(25).reset_index()
-        surg_count.columns = ["Surgeon", "Surgeries"]
-        surg_count = surg_count[surg_count["Surgeon"] != "Unknown Surgeon"]
-
-        st.altair_chart(
-            alt.Chart(surg_count).mark_bar(color="#ff6b6b").encode(
-                y=alt.Y("Surgeon:N", sort="-x"), x="Surgeries:Q"
-            ).properties(height=600), use_container_width=True
-        )
-        st.dataframe(surg_count.style.format({"Surgeries": "{:,}"}), use_container_width=True)
-
-    with tab_anes:
-        anes_count = df["ANAESTHETIST_NAME"].value_counts().head(25).reset_index()
-        anes_count.columns = ["Anaesthetist", "Cases"]
-        anes_count = anes_count[anes_count["Anaesthetist"] != "Not Recorded"]
-
-        st.altair_chart(
-            alt.Chart(anes_count).mark_bar(color="#4ecdc4").encode(
-                y=alt.Y("Anaesthetist:N", sort="-x"), x="Cases:Q"
-            ).properties(height=600), use_container_width=True
-        )
-        st.dataframe(anes_count.style.format({"Cases": "{:,}"}), use_container_width=True)
-
-    st.markdown("---")
-
-    # === 4. Full Register (Optional, collapsible) ===
-    with st.expander("View Full Surgery Register (All Details)"):
-        reg = df[["SURGERYDATE", "MRN", "PROCEDURE_NAME", "SURGEON_NAME", "ANAESTHETIST_NAME", "OTNUMBER", "ANAESTHESIA"]].copy()
-        reg["SURGERYDATE"] = pd.to_datetime(reg["SURGERYDATE"]).dt.strftime("%d-%b-%Y")
-        reg.rename(columns={
-            "SURGERYDATE": "Date", "MRN": "Patient", "PROCEDURE_NAME": "Procedure",
-            "SURGEON_NAME": "Surgeon", "ANAESTHETIST_NAME": "Anaesthetist",
-            "OTNUMBER": "OT", "ANAESTHESIA": "Anaesthesia Type"
-        }, inplace=True)
-        st.dataframe(reg, use_container_width=True, height=500)
 
 # ---- Reports tab ----
-with tabs[5]:
+with tabs[4]:
     st.header("📑 Patient Reports Viewer")
 
     st.subheader("🔍 Search Patient MRN")
@@ -2555,7 +2597,7 @@ with tabs[5]:
 
 # ---- Stats Tab ----
 # ---- Stats Tab ----
-with tabs[6]:
+with tabs[5]:
     st.header("📊 Patient Stats")
     
     # ============================================
@@ -2570,100 +2612,101 @@ with tabs[6]:
     occ_tab1, occ_tab2, occ_tab3 = st.tabs(["📈 Daily Trend", "🏥 By Department", "📍 By Location"])
     
     # TAB 1: Daily Trend
-    with occ_tab1:
-        st.markdown("#### Daily Occupancy Trend")
+    # TAB 1: Daily Trend
+with occ_tab1:
+    st.markdown("#### Daily Occupancy Trend")
+    
+    # Get daily trend data
+    _, _, _, trend_df = calculate_bed_occupancy(from_date, to_date)
+    
+    if not trend_df.empty:
+        # Aggregate by date
+        daily_agg = trend_df.groupby('THEDATE').agg({
+            'OPBAL': 'sum',
+            'ADMIT': 'sum',
+            'DISCH': 'sum',
+            'TRIN': 'sum',
+            'TROUT': 'sum',
+            'DEATH': 'sum',
+            'DAILY_OCCUPANCY': 'sum'
+        }).reset_index()
         
-        # Get daily trend data
-        _, _, _, trend_df = calculate_bed_occupancy(from_date, to_date)
+        daily_agg['OCCUPANCY_PCT'] = (daily_agg['DAILY_OCCUPANCY'] / total_beds * 100).round(2)
         
-        if not trend_df.empty:
-            # Aggregate by date
-            daily_agg = trend_df.groupby('THEDATE').agg({
-                'OPBAL': 'sum',
-                'ADMIT': 'sum',
-                'DISCH': 'sum',
-                'TRIN': 'sum',
-                'TROUT': 'sum',
-                'DEATH': 'sum',
-                'DAILY_OCCUPANCY': 'sum'
-            }).reset_index()
-            
-            daily_agg['OCCUPANCY_PCT'] = (daily_agg['DAILY_OCCUPANCY'] / total_beds * 100).round(2)
-            
-            # Summary metrics
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("📊 Total Beds", total_beds)
-            with col2:
-                st.metric("👥 Avg Daily Census", f"{avg_census:.0f}")
-            with col3:
-                peak = daily_agg['DAILY_OCCUPANCY'].max()
-                peak_pct = (peak / total_beds * 100)
-                st.metric("📈 Peak Occupancy", f"{int(peak)} ({peak_pct:.1f}%)")
-            with col4:
-                low = daily_agg['DAILY_OCCUPANCY'].min()
-                low_pct = (low / total_beds * 100)
-                st.metric("📉 Lowest Occupancy", f"{int(low)} ({low_pct:.1f}%)")
-            
-            # Chart
-            chart_data = daily_agg[['THEDATE', 'OCCUPANCY_PCT', 'DAILY_OCCUPANCY', 'ADMIT', 'DISCH']].copy()
-            
-            # Line chart for occupancy
-            line = alt.Chart(chart_data).mark_line(point=True, color='#00d4aa', strokeWidth=3).encode(
-                x=alt.X('THEDATE:T', title='Date'),
-                y=alt.Y('OCCUPANCY_PCT:Q', title='Occupancy %', scale=alt.Scale(domain=[0, max(100, chart_data['OCCUPANCY_PCT'].max() + 10)])),
-                tooltip=[
-                    alt.Tooltip('THEDATE:T', title='Date', format='%d-%b-%Y'),
-                    alt.Tooltip('DAILY_OCCUPANCY:Q', title='Census', format='.0f'),
-                    alt.Tooltip('OCCUPANCY_PCT:Q', title='Occupancy %', format='.2f'),
-                    alt.Tooltip('ADMIT:Q', title='Admissions', format='.0f'),
-                    alt.Tooltip('DISCH:Q', title='Discharges', format='.0f')
-                ]
-            )
-            
-            # Reference lines
-            target_line = alt.Chart(pd.DataFrame({'y': [85], 'label': ['Target 85%']})).mark_rule(
-                color='green', strokeDash=[5, 5], strokeWidth=2
-            ).encode(y='y:Q')
-            
-            critical_line = alt.Chart(pd.DataFrame({'y': [95], 'label': ['Critical 95%']})).mark_rule(
-                color='red', strokeDash=[5, 5], strokeWidth=2
-            ).encode(y='y:Q')
-            
-            st.altair_chart(line + target_line + critical_line, use_container_width=True)
-            
-            # Data table
-            st.markdown("#### 📋 Daily Data Table")
-            display_df = daily_agg.copy()
-            display_df['THEDATE'] = pd.to_datetime(display_df['THEDATE']).dt.strftime('%d-%b-%Y')
-            display_df = display_df.rename(columns={
-                'THEDATE': 'Date',
-                'OPBAL': 'Opening',
-                'ADMIT': 'Admitted',
-                'DISCH': 'Discharged',
-                'TRIN': 'Transfer In',
-                'TROUT': 'Transfer Out',
-                'DEATH': 'Deaths',
-                'DAILY_OCCUPANCY': 'Final Census',
-                'OCCUPANCY_PCT': 'Occupancy %'
-            })
-            
-            st.dataframe(
-                display_df.style.format({
-                    'Opening': '{:.0f}',
-                    'Admitted': '{:.0f}',
-                    'Discharged': '{:.0f}',
-                    'Transfer In': '{:.0f}',
-                    'Transfer Out': '{:.0f}',
-                    'Deaths': '{:.0f}',
-                    'Final Census': '{:.0f}',
-                    'Occupancy %': '{:.2f}%'
-                }).background_gradient(subset=['Occupancy %'], cmap='RdYlGn', vmin=50, vmax=100),
-                use_container_width=True,
-                height=400
-            )
-        else:
-            st.info("No census data available for the selected period.")
+        # Summary metrics
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("📊 Total Beds", total_beds)
+        with col2:
+            st.metric("👥 Avg Daily Census", f"{avg_census:.0f}")
+        with col3:
+            peak = daily_agg['DAILY_OCCUPANCY'].max()
+            peak_pct = (peak / total_beds * 100)
+            st.metric("📈 Peak Occupancy", f"{int(peak)} ({peak_pct:.1f}%)")
+        with col4:
+            low = daily_agg['DAILY_OCCUPANCY'].min()
+            low_pct = (low / total_beds * 100)
+            st.metric("📉 Lowest Occupancy", f"{int(low)} ({low_pct:.1f}%)")
+        
+        # Chart
+        chart_data = daily_agg[['THEDATE', 'OCCUPANCY_PCT', 'DAILY_OCCUPANCY', 'ADMIT', 'DISCH']].copy()
+        
+        # Line chart for occupancy
+        line = alt.Chart(chart_data).mark_line(point=True, color='#00d4aa', strokeWidth=3).encode(
+            x=alt.X('THEDATE:T', title='Date'),
+            y=alt.Y('OCCUPANCY_PCT:Q', title='Occupancy %', scale=alt.Scale(domain=[0, max(100, chart_data['OCCUPANCY_PCT'].max() + 10)])),
+            tooltip=[
+                alt.Tooltip('THEDATE:T', title='Date', format='%d-%b-%Y'),
+                alt.Tooltip('DAILY_OCCUPANCY:Q', title='Census', format='.0f'),
+                alt.Tooltip('OCCUPANCY_PCT:Q', title='Occupancy %', format='.2f'),
+                alt.Tooltip('ADMIT:Q', title='Admissions', format='.0f'),
+                alt.Tooltip('DISCH:Q', title='Discharges', format='.0f')
+            ]
+        )
+        
+        # Reference lines
+        target_line = alt.Chart(pd.DataFrame({'y': [85], 'label': ['Target 85%']})).mark_rule(
+            color='green', strokeDash=[5, 5], strokeWidth=2
+        ).encode(y='y:Q')
+        
+        critical_line = alt.Chart(pd.DataFrame({'y': [95], 'label': ['Critical 95%']})).mark_rule(
+            color='red', strokeDash=[5, 5], strokeWidth=2
+        ).encode(y='y:Q')
+        
+        st.altair_chart(line + target_line + critical_line, use_container_width=True)
+        
+        # Data table
+        st.markdown("#### 📋 Daily Data Table")
+        display_df = daily_agg.copy()
+        display_df['THEDATE'] = pd.to_datetime(display_df['THEDATE']).dt.strftime('%d-%b-%Y')
+        display_df = display_df.rename(columns={
+            'THEDATE': 'Date',
+            'OPBAL': 'Opening',
+            'ADMIT': 'Admitted',
+            'DISCH': 'Discharged',
+            'TRIN': 'Transfer In',
+            'TROUT': 'Transfer Out',
+            'DEATH': 'Deaths',
+            'DAILY_OCCUPANCY': 'Final Census',
+            'OCCUPANCY_PCT': 'Occupancy %'
+        })
+        
+        st.dataframe(
+            display_df.style.format({
+                'Opening': '{:.0f}',
+                'Admitted': '{:.0f}',
+                'Discharged': '{:.0f}',
+                'Transfer In': '{:.0f}',
+                'Transfer Out': '{:.0f}',
+                'Deaths': '{:.0f}',
+                'Final Census': '{:.0f}',
+                'Occupancy %': '{:.2f}%'
+            }).background_gradient(subset=['Occupancy %'], cmap='RdYlGn', vmin=50, vmax=100),
+            use_container_width=True,
+            height=400
+        )
+    else:
+        st.info("No census data available for the selected period.")
     
     # TAB 2: By Department
     with occ_tab2:
@@ -2879,10 +2922,329 @@ with tabs[6]:
         ).properties(height=400)
         st.altair_chart(chart_trend, use_container_width=True)
 
+# ---- Surgery Details tab ----
+# ────────────────────── ENHANCED SURGERY DETAILS TAB ──────────────────────
+# ---- Surgery Details tab – UPGRADED & CLEAN ----
+# ---- Surgery Details tab – FINAL FIXED & SUPERCHARGED ----
+# ---- Surgery Details tab – FINAL FIXED & SUPERCHARGED ----
+# ---- Surgery Details tab – FIXED WITH CORRECT JOIN ----
+# ---- Surgery Details tab – FIXED WITH SURGERY_PERSONNEL ----
+
+    # # ---- Surgery Details tab – FIXED WITH STAFFID FALLBACK ----
+# ---- Surgery Details tab – COMPLETE WITH ALL STAFF ROLES ----
+with tabs[7]:
+    st.header("Surgery Details")
+
+    # Build surgeon filter (if any)
+    surgeon_filter = ""
+    if selected_surgeon_id:
+        surgeon_filter = f"AND EXISTS (SELECT 1 FROM SURGERY_PERSONNEL sp WHERE sp.SURGERYID = s.SURGERYID AND sp.STAFFROLE = 'SURGEON' AND sp.STAFFID = '{safe_sql(selected_surgeon_id)}')"
+
+    # COMPLETE QUERY: All 16+ staff roles with STAFFID fallback
+    surgery_q = f"""
+    WITH RankedPersonnel AS (
+        SELECT 
+            sp.SURGERYID,
+            sp.STAFFID,
+            sp.STAFFROLE,
+            NVL(sm.STAFFNAME, sp.STAFFID) AS STAFFNAME,
+            ROW_NUMBER() OVER (PARTITION BY sp.SURGERYID, sp.STAFFROLE ORDER BY sp.STAFFID) AS rn
+        FROM SURGERY_PERSONNEL sp
+        LEFT JOIN STAFFMASTER sm ON sp.STAFFID = sm.STAFFID
+        WHERE UPPER(sp.STAFFID) != 'MIGRATED'
+    )
+    SELECT
+        s.SURGERYID,
+        s.MRN,
+        s.SURGERYDATE,
+        s.OTNUMBER,
+        s.ANAESTHESIA,
+        s.SURGERYTYPE,
+        NVL(sd.SURGERYNAME, 'Procedure Name Not Found') AS PROCEDURE_NAME,
+        NVL(sd.CATEGORY, 'Uncategorized') AS PROC_CATEGORY,
+        NVL(sd.SUBCATEGORY, '-') AS PROC_SUBCATEGORY,
+        -- Main roles
+        NVL(surgeon.STAFFNAME, 'Unknown Surgeon') AS SURGEON_NAME,
+        NVL(anaesthetist.STAFFNAME, 'Not Recorded') AS ANAESTHETIST_NAME,
+        NVL(asst_surgeon.STAFFNAME, '-') AS ASST_SURGEON_NAME,
+        NVL(asst_anes.STAFFNAME, '-') AS ASST_ANAESTHETIST_NAME,
+        NVL(perfusionist.STAFFNAME, '-') AS PERFUSIONIST_NAME,
+        NVL(rnurse.STAFFNAME, '-') AS RNURSE_NAME,
+        NVL(scnurse.STAFFNAME, '-') AS SCNURSE_NAME,
+        -- Additional roles
+        NVL(nurse.STAFFNAME, '-') AS NURSE_NAME,
+        NVL(techcath.STAFFNAME, '-') AS TECHCATH_NAME,
+        NVL(physiciancath.STAFFNAME, '-') AS PHYSICIANCATH_NAME,
+        NVL(technician.STAFFNAME, '-') AS TECHNICIAN_NAME,
+        NVL(asstphycath.STAFFNAME, '-') AS ASSTPHYCATH_NAME,
+        NVL(iomtech.STAFFNAME, '-') AS IOMTECH_NAME,
+        NVL(circnurse.STAFFNAME, '-') AS CIRCNURSE_NAME,
+        NVL(asstnurse.STAFFNAME, '-') AS ASSTNURSE_NAME,
+        NVL(wardnurse.STAFFNAME, '-') AS WARDNURSE_NAME
+    FROM SURGERY s
+    LEFT JOIN SURGERY_DETAILS sd 
+      ON s.SURGERYID = sd.SURGERYID
+     AND s.HOSPITALID = sd.HOSPITALID
+    -- Main roles (7)
+    LEFT JOIN RankedPersonnel surgeon ON s.SURGERYID = surgeon.SURGERYID AND surgeon.STAFFROLE = 'SURGEON' AND surgeon.rn = 1
+    LEFT JOIN RankedPersonnel anaesthetist ON s.SURGERYID = anaesthetist.SURGERYID AND anaesthetist.STAFFROLE = 'ANAESTHETIST' AND anaesthetist.rn = 1
+    LEFT JOIN RankedPersonnel asst_surgeon ON s.SURGERYID = asst_surgeon.SURGERYID AND asst_surgeon.STAFFROLE = 'ASSISTING SURGEON' AND asst_surgeon.rn = 1
+    LEFT JOIN RankedPersonnel asst_anes ON s.SURGERYID = asst_anes.SURGERYID AND asst_anes.STAFFROLE = 'ASSISTING ANAESTHETIST' AND asst_anes.rn = 1
+    LEFT JOIN RankedPersonnel perfusionist ON s.SURGERYID = perfusionist.SURGERYID AND perfusionist.STAFFROLE = 'PERFUSIONIST' AND perfusionist.rn = 1
+    LEFT JOIN RankedPersonnel rnurse ON s.SURGERYID = rnurse.SURGERYID AND rnurse.STAFFROLE = 'RNURSE' AND rnurse.rn = 1
+    LEFT JOIN RankedPersonnel scnurse ON s.SURGERYID = scnurse.SURGERYID AND scnurse.STAFFROLE = 'SCNURSE' AND scnurse.rn = 1
+    -- Additional roles (9)
+    LEFT JOIN RankedPersonnel nurse ON s.SURGERYID = nurse.SURGERYID AND nurse.STAFFROLE = 'NURSE' AND nurse.rn = 1
+    LEFT JOIN RankedPersonnel techcath ON s.SURGERYID = techcath.SURGERYID AND techcath.STAFFROLE = 'TECHCATH' AND techcath.rn = 1
+    LEFT JOIN RankedPersonnel physiciancath ON s.SURGERYID = physiciancath.SURGERYID AND physiciancath.STAFFROLE = 'PHYSICIANCATH' AND physiciancath.rn = 1
+    LEFT JOIN RankedPersonnel technician ON s.SURGERYID = technician.SURGERYID AND technician.STAFFROLE = 'TECHNICIAN' AND technician.rn = 1
+    LEFT JOIN RankedPersonnel asstphycath ON s.SURGERYID = asstphycath.SURGERYID AND asstphycath.STAFFROLE = 'ASSTPHYCATH' AND asstphycath.rn = 1
+    LEFT JOIN RankedPersonnel iomtech ON s.SURGERYID = iomtech.SURGERYID AND iomtech.STAFFROLE = 'IOMTECH' AND iomtech.rn = 1
+    LEFT JOIN RankedPersonnel circnurse ON s.SURGERYID = circnurse.SURGERYID AND circnurse.STAFFROLE = 'CIRCNURSE' AND circnurse.rn = 1
+    LEFT JOIN RankedPersonnel asstnurse ON s.SURGERYID = asstnurse.SURGERYID AND asstnurse.STAFFROLE = 'ASSTNURSE' AND asstnurse.rn = 1
+    LEFT JOIN RankedPersonnel wardnurse ON s.SURGERYID = wardnurse.SURGERYID AND wardnurse.STAFFROLE = 'WARDNURSE' AND wardnurse.rn = 1
+    WHERE s.SURGERYDATE BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD')
+                           AND TO_DATE('{to_date}', 'YYYY-MM-DD') + 0.99999
+      AND (s.HOSPITALID = '{safe_sql(selected_hospital)}' OR '{selected_hospital}' = 'All Hospitals')
+      {surgeon_filter}
+    ORDER BY s.SURGERYDATE DESC
+    """
+
+    try:
+        df = pd.read_sql(surgery_q, conn)
+    except Exception as e:
+        st.error(f"Query failed: {e}")
+        with st.expander("Show SQL Query"):
+            st.code(surgery_q)
+        df = pd.DataFrame()
+
+    if df.empty:
+        st.warning("No surgeries found for the selected filters.")
+        st.stop()
+
+    total_surgeries = len(df)
+    days = (to_date - from_date).days + 1
+    daily_avg = round(total_surgeries / days, 1)
+
+    # KPIs
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        st.markdown(kpi_card_html("Total Surgeries", f"{total_surgeries:,}", f"{from_date} → {to_date}", "kpi-grad-1", "🔪"), unsafe_allow_html=True)
+    with c2:
+        st.markdown(kpi_card_html("Daily Average", daily_avg, f"{days} days", "kpi-grad-2", "📅"), unsafe_allow_html=True)
+    with c3:
+        st.markdown(kpi_card_html("Unique Patients", df["MRN"].nunique(), "Distinct MRNs", "kpi-grad-3", "👥"), unsafe_allow_html=True)
+    with c4:
+        st.markdown(kpi_card_html("OT Rooms Used", df["OTNUMBER"].nunique(), "Active theatres", "kpi-grad-4", "🚪"), unsafe_allow_html=True)
+    with c5:
+        active_surgeons = df[df["SURGEON_NAME"] != "Unknown Surgeon"]["SURGEON_NAME"].nunique()
+        st.markdown(kpi_card_html("Active Surgeons", active_surgeons, "Performed at least 1 surgery", "kpi-grad-5", "👨‍⚕️"), unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # === 1. TOP PROCEDURES ===
+    st.subheader("📊 Top 20 Procedures Performed")
+    proc = df["PROCEDURE_NAME"].value_counts().head(20).reset_index()
+    proc.columns = ["Procedure", "Count"]
+
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        chart = alt.Chart(proc).mark_bar(color="#00d4aa").encode(
+            y=alt.Y("Procedure:N", sort="-x"),
+            x="Count:Q",
+            tooltip=["Procedure", "Count"]
+        ).properties(height=520)
+        st.altair_chart(chart, use_container_width=True)
+    with col2:
+        st.metric("Total Unique Procedures", len(df["PROCEDURE_NAME"].unique()))
+        if not proc.empty:
+            st.metric("Most Common", proc.iloc[0]["Procedure"])
+            st.metric("Performed", f"{proc.iloc[0]['Count']:,} times")
+
+    # === 2. FULL PROCEDURE LIST ===
+    with st.expander("📋 Complete Procedure Master List (All Performed)", expanded=False):
+        full_proc = df["PROCEDURE_NAME"].value_counts().reset_index()
+        full_proc.columns = ["Procedure Name", "Times Performed"]
+        full_proc = full_proc.sort_values("Times Performed", ascending=False).reset_index(drop=True)
+        full_proc.insert(0, "Rank", range(1, len(full_proc)+1))
+
+        search = st.text_input("🔍 Search procedure", key="proc_search_tab4")
+        display = full_proc[full_proc["Procedure Name"].str.contains(search, case=False, na=False)] if search else full_proc
+
+        st.dataframe(display.style.format({"Times Performed": "{:,}"}), use_container_width=True, height=500)
+
+        csv = full_proc.to_csv(index=False).encode()
+        st.download_button("📥 Download Full List (CSV)", data=csv,
+                           file_name=f"Procedures_{from_date}_to_{to_date}.csv", mime="text/csv")
+
+    st.markdown("---")
+
+    # === 3. ALL STAFF LEADERBOARDS (16 ROLES) ===
+    st.subheader("👨‍⚕️ Staff Leaderboards by Role")
+
+    # Create tabs for main roles
+    tab_roles = st.tabs([
+        "🔪 Surgeons", 
+        "💉 Anaesthetists", 
+        "🩺 Assisting Surgeons",
+        "💊 Assisting Anaesthetists",
+        "❤️ Perfusionists",
+        "👩‍⚕️ R Nurses",
+        "🏥 SC Nurses",
+        "👨‍⚕️ Nurses",
+        "🔧 Technicians",
+        "📡 More Roles"
+    ])
+
+    # Define role configurations (main 8)
+    roles_config = [
+        {"col": "SURGEON_NAME", "title": "Surgeon", "color": "#ff6b6b", "exclude": ["Unknown Surgeon"]},
+        {"col": "ANAESTHETIST_NAME", "title": "Anaesthetist", "color": "#4ecdc4", "exclude": ["Not Recorded"]},
+        {"col": "ASST_SURGEON_NAME", "title": "Assisting Surgeon", "color": "#f39c12", "exclude": ["-"]},
+        {"col": "ASST_ANAESTHETIST_NAME", "title": "Assisting Anaesthetist", "color": "#9b59b6", "exclude": ["-"]},
+        {"col": "PERFUSIONIST_NAME", "title": "Perfusionist", "color": "#e74c3c", "exclude": ["-"]},
+        {"col": "RNURSE_NAME", "title": "R Nurse", "color": "#1abc9c", "exclude": ["-"]},
+        {"col": "SCNURSE_NAME", "title": "SC Nurse", "color": "#3498db", "exclude": ["-"]},
+        {"col": "NURSE_NAME", "title": "Nurse", "color": "#16a085", "exclude": ["-"]},
+        {"col": "TECHNICIAN_NAME", "title": "Technician", "color": "#34495e", "exclude": ["-"]}
+    ]
+
+    # Render first 9 tabs
+    for i, (tab, config) in enumerate(zip(tab_roles[:9], roles_config)):
+        with tab:
+            filtered_df = df[
+                df[config["col"]].notna() & 
+                (~df[config["col"]].isin(config["exclude"]))
+            ]
+            
+            if filtered_df.empty:
+                st.info(f"No {config['title']} data available for this period.")
+                continue
+            
+            role_count = filtered_df[config["col"]].value_counts().head(25).reset_index()
+            role_count.columns = [config["title"], "Cases"]
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric(f"Total {config['title']}s", len(role_count))
+            with col2:
+                st.metric("Total Cases", role_count["Cases"].sum())
+            with col3:
+                if not role_count.empty:
+                    st.metric("Top Performer", role_count.iloc[0][config["title"]], f"{role_count.iloc[0]['Cases']:,} cases")
+            
+            st.altair_chart(
+                alt.Chart(role_count).mark_bar(color=config["color"]).encode(
+                    y=alt.Y(f"{config['title']}:N", sort="-x"),
+                    x="Cases:Q",
+                    tooltip=[config["title"], "Cases"]
+                ).properties(height=min(600, len(role_count) * 30 + 100)), 
+                use_container_width=True
+            )
+            
+            st.dataframe(role_count.style.format({"Cases": "{:,}"}), use_container_width=True)
+
+    # Last tab: More roles
+    with tab_roles[9]:
+        st.markdown("#### Additional Specialized Roles")
+        
+        additional_roles = [
+            ("TECHCATH_NAME", "Cath Lab Technician"),
+            ("PHYSICIANCATH_NAME", "Cath Lab Physician"),
+            ("ASSTPHYCATH_NAME", "Assisting Cath Physician"),
+            ("IOMTECH_NAME", "IOM Technician"),
+            ("CIRCNURSE_NAME", "Circulating Nurse"),
+            ("ASSTNURSE_NAME", "Assistant Nurse"),
+            ("WARDNURSE_NAME", "Ward Nurse")
+        ]
+        
+        for col_name, role_title in additional_roles:
+            filtered_df = df[df[col_name].notna() & (df[col_name] != "-")]
+            
+            if not filtered_df.empty:
+                role_count = filtered_df[col_name].value_counts().head(10).reset_index()
+                role_count.columns = [role_title, "Cases"]
+                
+                with st.expander(f"📊 {role_title} ({len(role_count)} staff)", expanded=False):
+                    st.dataframe(role_count.style.format({"Cases": "{:,}"}), use_container_width=True)
+
+    st.markdown("---")
+
+    # # === 4. CATEGORY & SUBCATEGORY BREAKDOWN ===
+    # st.subheader("📂 Procedure Categories")
+    
+    # tab_cat, tab_subcat = st.tabs(["📊 By Category", "📋 By Subcategory"])
+    
+    # with tab_cat:
+    #     cat_count = df["PROC_CATEGORY"].value_counts().reset_index()
+    #     cat_count.columns = ["Category", "Count"]
+        
+    #     st.altair_chart(
+    #         alt.Chart(cat_count).mark_bar(color="#9b59b6").encode(
+    #             y=alt.Y("Category:N", sort="-x"),
+    #             x="Count:Q",
+    #             tooltip=["Category", "Count"]
+    #         ).properties(height=400), use_container_width=True
+    #     )
+    #     st.dataframe(cat_count.style.format({"Count": "{:,}"}), use_container_width=True)
+    
+    # with tab_subcat:
+    #     subcat_count = df["PROC_SUBCATEGORY"].value_counts().head(20).reset_index()
+    #     subcat_count.columns = ["Subcategory", "Count"]
+        
+    #     st.altair_chart(
+    #         alt.Chart(subcat_count).mark_bar(color="#e67e22").encode(
+    #             y=alt.Y("Subcategory:N", sort="-x"),
+    #             x="Count:Q",
+    #             tooltip=["Subcategory", "Count"]
+    #         ).properties(height=500), use_container_width=True
+    #     )
+    #     st.dataframe(subcat_count.style.format({"Count": "{:,}"}), use_container_width=True)
+
+    # st.markdown("---")
+
+    # === 5. FULL SURGERY REGISTER ===
+    with st.expander("📄 View Full Surgery Register (All Details)", expanded=False):
+        reg = df[[
+            "SURGERYDATE", "MRN", "PROCEDURE_NAME", "PROC_CATEGORY", "PROC_SUBCATEGORY",
+            "SURGEON_NAME", "ANAESTHETIST_NAME", "ASST_SURGEON_NAME", "ASST_ANAESTHETIST_NAME",
+            "PERFUSIONIST_NAME", "RNURSE_NAME", "SCNURSE_NAME", "NURSE_NAME", 
+            "OTNUMBER", "ANAESTHESIA"
+        ]].copy()
+        
+        reg["SURGERYDATE"] = pd.to_datetime(reg["SURGERYDATE"]).dt.strftime("%d-%b-%Y")
+        reg.rename(columns={
+            "SURGERYDATE": "Date",
+            "MRN": "Patient",
+            "PROCEDURE_NAME": "Procedure",
+            "PROC_CATEGORY": "Category",
+            "PROC_SUBCATEGORY": "Subcategory",
+            "SURGEON_NAME": "Surgeon",
+            "ANAESTHETIST_NAME": "Anaesthetist",
+            "ASST_SURGEON_NAME": "Asst Surgeon",
+            "ASST_ANAESTHETIST_NAME": "Asst Anaesthetist",
+            "PERFUSIONIST_NAME": "Perfusionist",
+            "RNURSE_NAME": "R Nurse",
+            "SCNURSE_NAME": "SC Nurse",
+            "NURSE_NAME": "Nurse",
+            "OTNUMBER": "OT",
+            "ANAESTHESIA": "Anaesthesia Type"
+        }, inplace=True)
+        
+        st.dataframe(reg, use_container_width=True, height=500)
+        
+        csv_reg = reg.to_csv(index=False).encode()
+        st.download_button(
+            "📥 Download Full Register (CSV)",
+            data=csv_reg,
+            file_name=f"Surgery_Register_{from_date}_to_{to_date}.csv",
+            mime="text/csv"
+        )
+
     # ---- TAB 7: Custom Metrics Manager ----
 # ---- TAB 7: Custom Metrics Manager ----
 # ---- TAB 7: Custom Metrics Manager (FIXED & ROBUST) ----
-with tabs[7]:
+with tabs[6]:
     st.header("Custom Metrics Manager")
 
     # ==================================================================
