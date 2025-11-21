@@ -21,35 +21,863 @@ import io
 import zipfile
 from datetime import date, datetime, timedelta
 import streamlit.components.v1 as components
+import json
+import os
+from pathlib import Path
 
-from elasticsearch import Elasticsearch
-from elasticsearch.helpers import bulk
+# ────────────────────── ADD THIS BLOCK ──────────────────────
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.units import inch
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+# ───────────────────────────────────────────────────────────
 
-# Elasticsearch configuration
-ES_HOST = "localhost"
-ES_PORT = 9200
-ES_INDEX_PREFIX = "hospital_"
+# ========================================
+# CUSTOM METRICS MANAGER - EMBEDDED
+# ========================================
+# ========================================
+# CUSTOM METRICS MANAGER - COMPLETE FIXED VERSION
+# ========================================
 
-def get_es_client():
-    """Create Elasticsearch client"""
-    try:
-        es = Elasticsearch([f"http://{ES_HOST}:{ES_PORT}"])
-        if es.ping():
-            return es
+class CustomMetricsManager:
+    def __init__(self, config_dir="custom_metrics"):
+        """Initialize the custom metrics manager"""
+        self.config_dir = Path(config_dir)
+        self.config_dir.mkdir(exist_ok=True)
+        self.metrics_file = self.config_dir / "saved_metrics.json"
+        self.templates_dir = self.config_dir / "templates"
+        self.templates_dir.mkdir(exist_ok=True)
+        
+    def parse_metric_file(self, file_content):
+        """Parse a metric definition file"""
+        lines = file_content.strip().split('\n')
+        metric_def = {
+            'name': '',
+            'icon': '📊',
+            'color': 'kpi-grad-1',
+            'description': '',
+            'query': '',
+            'type': 'single_value',  # NEW: default type
+            'created_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        query_started = False
+        query_lines = []
+        
+        for line in lines:
+            line = line.strip()
+            
+            if query_started:
+                query_lines.append(line)
+            elif line.startswith('METRIC_NAME:'):
+                metric_def['name'] = line.split('METRIC_NAME:', 1)[1].strip()
+            elif line.startswith('METRIC_ICON:'):
+                metric_def['icon'] = line.split('METRIC_ICON:', 1)[1].strip()
+            elif line.startswith('METRIC_COLOR:'):
+                metric_def['color'] = line.split('METRIC_COLOR:', 1)[1].strip()
+            elif line.startswith('METRIC_TYPE:'):  # NEW: optional type specification
+                metric_def['type'] = line.split('METRIC_TYPE:', 1)[1].strip().lower()
+            elif line.startswith('DESCRIPTION:'):
+                metric_def['description'] = line.split('DESCRIPTION:', 1)[1].strip()
+            elif line.startswith('QUERY:'):
+                query_started = True
+        
+        metric_def['query'] = '\n'.join(query_lines).strip()
+        
+        if not metric_def['name']:
+            raise ValueError("METRIC_NAME is required")
+        if not metric_def['query']:
+            raise ValueError("QUERY is required")
+            
+        return metric_def
+    
+    def save_metric(self, metric_def):
+        """Save a metric definition to persistent storage"""
+        metrics = self.load_saved_metrics()
+        metric_id = metric_def['name'].lower().replace(' ', '_')
+        metrics[metric_id] = metric_def
+        
+        with open(self.metrics_file, 'w') as f:
+            json.dump(metrics, f, indent=2)
+        
+        return metric_id
+    
+    def load_saved_metrics(self):
+        """Load all saved metrics from storage"""
+        if not self.metrics_file.exists():
+            return {}
+        
+        try:
+            with open(self.metrics_file, 'r') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    
+    def delete_metric(self, metric_id):
+        """Delete a saved metric"""
+        metrics = self.load_saved_metrics()
+        if metric_id in metrics:
+            del metrics[metric_id]
+            with open(self.metrics_file, 'w') as f:
+                json.dump(metrics, f, indent=2)
+            return True
+        return False
+    
+    def execute_metric_query(self, query, conn, from_date=None, to_date=None, 
+                            selected_hospital=None, selected_dept=None):
+        """
+        FIXED: Execute a metric query with parameter substitution
+        Now supports both single values and tables
+        """
+        if from_date:
+            query = query.replace('{from_date}', str(from_date))
+        if to_date:
+            query = query.replace('{to_date}', str(to_date))
+        if selected_hospital:
+            query = query.replace('{hospital}', str(selected_hospital))
+        if selected_dept:
+            query = query.replace('{dept}', str(selected_dept))
+        
+        try:
+            result = pd.read_sql(query, conn)
+            
+            # FIXED: Check if this is a table result (multiple rows or columns)
+            if len(result) > 1 or len(result.columns) > 1:
+                return result  # Return DataFrame for tables
+            
+            # Single value result
+            if 'VALUE' in result.columns:
+                return result['VALUE'].iloc[0]
+            else:
+                return result.iloc[0, 0]
+        except Exception as e:
+            raise Exception(f"Query execution failed: {str(e)}")
+    
+    def create_sample_template(self):
+        """FIXED: Create a sample metric template file with both types"""
+        sample = """METRIC_NAME: Total Active Patients
+METRIC_ICON: 👥
+METRIC_COLOR: kpi-grad-1
+METRIC_TYPE: single_value
+DESCRIPTION: Count of all active patients in the system
+QUERY:
+SELECT COUNT(*) as VALUE
+FROM PATIENT
+WHERE STATUS = 'A'
+
+---
+
+Example for TABLE metric:
+
+METRIC_NAME: Top Departments by Patient Count
+METRIC_ICON: 🏥
+METRIC_COLOR: kpi-grad-2
+METRIC_TYPE: table
+DESCRIPTION: Shows patient distribution across departments
+QUERY:
+SELECT 
+    DEPTNAME as Department,
+    COUNT(*) as Patient_Count,
+    ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 2) as Percentage
+FROM INPATIENT i
+JOIN DEPARTMENT d ON i.DEPTCODE = d.DEPTCODE
+WHERE i.DOA BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD') 
+                AND TO_DATE('{to_date}', 'YYYY-MM-DD')
+GROUP BY DEPTNAME
+ORDER BY Patient_Count DESC
+FETCH FIRST 10 ROWS ONLY
+"""
+        template_file = self.templates_dir / "sample_metric.txt"
+        with open(template_file, 'w') as f:
+            f.write(sample)
+        return template_file
+
+
+# ========================================
+# RENDER FUNCTION - FIXED FOR PERMISSIONS
+# ========================================
+
+def render_custom_metrics_ui(conn, from_date, to_date, selected_hospital, selected_dept):
+    """
+    FIXED: Render the custom metrics UI in Streamlit
+    Now supports role-based access:
+    - Admins: Can view, add, and manage metrics
+    - Users: Can only view metrics
+    """
+    #st.header("🎯 Custom Metrics Manager")
+   
+    manager = CustomMetricsManager()
+    is_admin = st.session_state.get("role") == "admin"
+   
+    # FIXED: Show different tabs based on role
+    if is_admin:
+        tab1, tab2, tab3 = st.tabs(["📊 View Metrics", "➕ Add New Metric", "⚙️ Manage Metrics"])
+    else:
+        # Non-admin users only see View Metrics - create a single tab list
+        tabs_list = st.tabs(["📊 View Metrics"])
+        tab1 = tabs_list[0]
+   
+    # ============================================
+    # TAB 1: VIEW METRICS (Available to all users)
+    # ============================================
+    with tab1:
+        # Show info for non-admin users
+        if not is_admin:
+            st.info("💡 Only administrators can add or manage custom metrics. Contact your admin to create new metrics.")
+       
+        st.subheader("Active Custom Metrics")
+       
+        saved_metrics = manager.load_saved_metrics()
+       
+        if not saved_metrics:
+            if is_admin:
+                st.info("📭 No custom metrics saved yet. Go to 'Add New Metric' tab to create one!")
+            else:
+                st.info("📭 No custom metrics available yet. Ask an administrator to create metrics.")
         else:
-            st.warning("⚠️ Elasticsearch is not responding")
-            return None
-    except Exception as e:
-        st.warning(f"⚠️ Elasticsearch connection failed: {e}")
-        return None
+            metrics_per_row = 3
+            metric_items = list(saved_metrics.items())
+           
+            for i in range(0, len(metric_items), metrics_per_row):
+                cols = st.columns(metrics_per_row)
+               
+                for j in range(metrics_per_row):
+                    idx = i + j
+                    if idx >= len(metric_items):
+                        break
+                   
+                    metric_id, metric_def = metric_items[idx]
+                   
+                    with cols[j]:
+                        with st.container():
+                            st.markdown(f"### {metric_def['icon']} {metric_def['name']}")
+                           
+                            try:
+                                result = manager.execute_metric_query(
+                                    metric_def['query'],
+                                    conn,
+                                    from_date=from_date,
+                                    to_date=to_date,
+                                    selected_hospital=selected_hospital,
+                                    selected_dept=selected_dept
+                                )
+                               
+                                # Check if result is a DataFrame (table) or single value
+                                if isinstance(result, pd.DataFrame):
+                                    st.caption(metric_def['description'])
+                                    st.dataframe(result, use_container_width=True, height=300)
+                                    st.caption(f"📊 {len(result)} rows returned")
+                                else:
+                                    # Single value
+                                    if isinstance(result, (int, float)):
+                                        if isinstance(result, float):
+                                            display_value = f"{result:,.2f}"
+                                        else:
+                                            display_value = f"{result:,}"
+                                    else:
+                                        display_value = str(result)
+                                   
+                                    st.metric(label=metric_def['name'], value=display_value)
+                                    st.caption(metric_def['description'])
+                               
+                            except Exception as e:
+                                st.error(f"Error: {str(e)}")
+                                st.caption(metric_def['description'])
+   
+    # ============================================
+    # TAB 2 & 3: ADD NEW METRIC & MANAGE (Admin only)
+    # ============================================
+    if is_admin:
+        with tab2:
+            st.subheader("➕ Create New Custom Metric")
+           
+            st.info("""
+            📝 **How to create a metric:**
+            1. Upload a text file with metric definition, OR
+            2. Use the form below to create one
+           
+            **Metric Types:**
+            - **Single Value**: Returns one number (e.g., COUNT, SUM, AVG)
+            - **Table**: Returns multiple rows of data
+           
+            **Supported placeholders in queries:**
+            - `{from_date}` - Start date from filters
+            - `{to_date}` - End date from filters
+            - `{hospital}` - Selected hospital
+            - `{dept}` - Selected department
+            """)
+           
+            st.markdown("#### Option 1: Upload Metric File")
+            uploaded_file = st.file_uploader("Upload metric definition (.txt)", type=['txt'], key="metric_upload")
+           
+            if uploaded_file:
+                try:
+                    file_content = uploaded_file.read().decode('utf-8')
+                    metric_def = manager.parse_metric_file(file_content)
+                   
+                    st.success(f"✅ Parsed metric: **{metric_def['name']}**")
+                    st.json(metric_def)
+                   
+                    if st.button("💾 Save This Metric", key="save_uploaded"):
+                        metric_id = manager.save_metric(metric_def)
+                        st.success(f"✅ Metric saved with ID: {metric_id}")
+                        st.balloons()
+                        st.rerun()
+                       
+                except Exception as e:
+                    st.error(f"❌ Error parsing file: {str(e)}")
+           
+            st.markdown("---")
+            st.markdown("#### Option 2: Create Using Form")
+           
+            with st.form("new_metric_form"):
+                metric_name = st.text_input("Metric Name*", placeholder="e.g., Total Revenue")
+               
+                col1, col2 = st.columns(2)
+                with col1:
+                    metric_icon = st.text_input("Icon (emoji)", value="📊")
+                with col2:
+                    color_options = ["kpi-grad-1", "kpi-grad-2", "kpi-grad-3", "kpi-grad-4",
+                                    "kpi-grad-5", "kpi-grad-6", "kpi-grad-7", "kpi-grad-8"]
+                    metric_color = st.selectbox("Color Theme", color_options)
+               
+                metric_type = st.radio(
+                    "Metric Type*",
+                    options=["Single Value", "Table"],
+                    help="Single Value: Shows one number. Table: Shows multiple rows of data."
+                )
+               
+                metric_desc = st.text_area("Description", placeholder="What does this metric measure?")
+               
+                if metric_type == "Single Value":
+                    query_placeholder = """SELECT COUNT(*) as VALUE
+FROM YOUR_TABLE
+WHERE DATE_COLUMN BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD')
+                       AND TO_DATE('{to_date}', 'YYYY-MM-DD')"""
+                    query_help = "Query must return a single value. Use column name 'VALUE' or it will use first column."
+                else:
+                    query_placeholder = """SELECT
+    COLUMN1,
+    COLUMN2,
+    COUNT(*) as COUNT
+FROM YOUR_TABLE
+WHERE DATE_COLUMN BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD')
+                       AND TO_DATE('{to_date}', 'YYYY-MM-DD')
+GROUP BY COLUMN1, COLUMN2
+ORDER BY COUNT DESC"""
+                    query_help = "Query can return multiple rows and columns. Results will be displayed as a table."
+               
+                metric_query = st.text_area(
+                    "SQL Query*",
+                    placeholder=query_placeholder,
+                    height=200
+                )
+               
+                st.caption(f"⚠️ {query_help}")
+               
+                submitted = st.form_submit_button("💾 Save Metric")
+               
+                if submitted:
+                    if not metric_name or not metric_query:
+                        st.error("❌ Metric Name and Query are required!")
+                    else:
+                        metric_def = {
+                            'name': metric_name,
+                            'icon': metric_icon,
+                            'color': metric_color,
+                            'description': metric_desc,
+                            'query': metric_query,
+                            'type': metric_type.lower().replace(" ", "_"),
+                            'created_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        }
+                       
+                        try:
+                            metric_id = manager.save_metric(metric_def)
+                            st.success(f"✅ Metric '{metric_name}' saved successfully!")
+                            st.balloons()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Error saving metric: {str(e)}")
+           
+            st.markdown("---")
+            st.markdown("#### 📥 Download Sample Template")
+            if st.button("Download Sample Metric Template"):
+                template_file = manager.create_sample_template()
+                with open(template_file, 'r') as f:
+                    st.download_button(
+                        label="📄 Download sample_metric.txt",
+                        data=f.read(),
+                        file_name="sample_metric.txt",
+                        mime="text/plain"
+                    )
+       
+        # ============================================
+        # TAB 3: MANAGE METRICS (Admin only)
+        # ============================================
+        with tab3:
+            st.subheader("⚙️ Manage Saved Metrics")
+           
+            saved_metrics = manager.load_saved_metrics()
+           
+            if not saved_metrics:
+                st.info("No metrics to manage.")
+            else:
+                for metric_id, metric_def in saved_metrics.items():
+                    with st.expander(f"{metric_def['icon']} {metric_def['name']}", expanded=False):
+                        st.markdown(f"**ID:** `{metric_id}`")
+                        st.markdown(f"**Type:** {metric_def.get('type', 'single_value').replace('_', ' ').title()}")
+                        st.markdown(f"**Description:** {metric_def['description']}")
+                        st.markdown(f"**Created:** {metric_def.get('created_date', 'N/A')}")
+                       
+                        st.code(metric_def['query'], language='sql')
+                       
+                        col1, col2, col3 = st.columns(3)
+                       
+                        with col1:
+                            if st.button("🧪 Test Query", key=f"test_{metric_id}"):
+                                try:
+                                    result = manager.execute_metric_query(
+                                        metric_def['query'],
+                                        conn,
+                                        from_date=from_date,
+                                        to_date=to_date,
+                                        selected_hospital=selected_hospital,
+                                        selected_dept=selected_dept
+                                    )
+                                   
+                                    if isinstance(result, pd.DataFrame):
+                                        st.success(f"✅ Table Result: {len(result)} rows")
+                                        st.dataframe(result)
+                                    else:
+                                        st.success(f"✅ Result: **{result}**")
+                                except Exception as e:
+                                    st.error(f"❌ Query failed: {str(e)}")
+                       
+                        with col2:
+                            file_content = f"""METRIC_NAME: {metric_def['name']}
+METRIC_ICON: {metric_def['icon']}
+METRIC_COLOR: {metric_def['color']}
+METRIC_TYPE: {metric_def.get('type', 'single_value')}
+DESCRIPTION: {metric_def['description']}
+QUERY:
+{metric_def['query']}
+"""
+                            st.download_button(
+                                label="📥 Download",
+                                data=file_content,
+                                file_name=f"{metric_id}.txt",
+                                mime="text/plain",
+                                key=f"download_{metric_id}"
+                            )
+                       
+                        with col3:
+                            if st.button("🗑️ Delete", key=f"delete_{metric_id}", type="secondary"):
+                                if manager.delete_metric(metric_id):
+                                    st.success(f"✅ Deleted {metric_def['name']}")
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Failed to delete")
 
-# Initialize ES client
-es_client = get_es_client()
 
+# ========================================
+# DISPLAY FUNCTION - FIXED FOR TABLES
+# ========================================
+
+def display_custom_metrics_row(conn, from_date, to_date, selected_hospital, selected_dept, kpi_card_html):
+    """
+    FIXED: Display custom metrics in a row
+    Now supports both single values and tables
+    """
+    manager = CustomMetricsManager()
+    saved_metrics = manager.load_saved_metrics()
+    
+    if saved_metrics:
+        st.markdown("---")
+        st.subheader("🎯 Custom Metrics")
+        
+        metrics_per_row = 4
+        metric_items = list(saved_metrics.items())
+        
+        for i in range(0, len(metric_items), metrics_per_row):
+            cols = st.columns(metrics_per_row)
+            
+            for j in range(metrics_per_row):
+                idx = i + j
+                if idx >= len(metric_items):
+                    break
+                
+                metric_id, metric_def = metric_items[idx]
+                
+                with cols[j]:
+                    try:
+                        result = manager.execute_metric_query(
+                            metric_def['query'],
+                            conn,
+                            from_date=from_date,
+                            to_date=to_date,
+                            selected_hospital=selected_hospital,
+                            selected_dept=selected_dept
+                        )
+                        
+                        # FIXED: Check if result is a DataFrame (table)
+                        if isinstance(result, pd.DataFrame):
+                            # For tables, show row count as the metric
+                            display_value = f"{len(result)} rows"
+                            st.markdown(
+                                kpi_card_html(
+                                    metric_def['name'],
+                                    display_value,
+                                    f"📊 {metric_def['description'][:30]}...",
+                                    metric_def['color'],
+                                    metric_def['icon']
+                                ),
+                                unsafe_allow_html=True
+                            )
+                            with st.expander("View Details"):
+                                st.dataframe(result, use_container_width=True)
+                        else:
+                            # Single value
+                            if isinstance(result, (int, float)):
+                                if isinstance(result, float):
+                                    display_value = f"{result:,.2f}"
+                                else:
+                                    display_value = f"{result:,}"
+                            else:
+                                display_value = str(result)
+                            
+                            st.markdown(
+                                kpi_card_html(
+                                    metric_def['name'],
+                                    display_value,
+                                    metric_def['description'],
+                                    metric_def['color'],
+                                    metric_def['icon']
+                                ),
+                                unsafe_allow_html=True
+                            )
+                        
+                    except Exception as e:
+                        st.markdown(
+                            kpi_card_html(
+                                metric_def['name'],
+                                "Error",
+                                str(e)[:50],
+                                "kpi-grad-5",
+                                "⚠️"
+                            ),
+                            unsafe_allow_html=True
+                        )
+# Add this function near the top of your dashboard.py file (after imports, before page config)
+
+def inject_modern_css():
+    """Inject modern, professional CSS styling"""
+    st.markdown("""
+    <style>
+    /* ========== HIDE SIDEBAR PAGE NAVIGATION ========== */
+    [data-testid="stSidebarNav"] {
+        display: none;
+    }
+    
+    /* Hide the divider line after nav */
+    section[data-testid="stSidebar"] > div:first-child > div:first-child {
+        padding-top: 0rem;
+    }
+    /* ================================================== */
+    
+    /* Global */
+    .main { 
+        background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); 
+    }
+    
+    /* Enhanced KPI Cards */
+    .kpi-card {
+        padding: 24px 20px;
+        border-radius: 16px;
+        color: white;
+        text-align: center;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        margin-bottom: 16px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        position: relative;
+        overflow: hidden;
+        backdrop-filter: blur(10px);
+    }
+    
+    .kpi-card::before {
+        content: '';
+        position: absolute;
+        top: -50%;
+        right: -50%;
+        width: 200%;
+        height: 200%;
+        background: radial-gradient(circle, rgba(255,255,255,0.2) 0%, transparent 70%);
+        pointer-events: none;
+    }
+    
+    .kpi-card:hover {
+        transform: translateY(-8px) scale(1.02);
+        box-shadow: 0 16px 32px rgba(0,0,0,0.25);
+    }
+    
+    .kpi-icon {
+        font-size: 36px;
+        margin-bottom: 10px;
+        filter: drop-shadow(0 2px 4px rgba(0,0,0,0.2));
+    }
+    
+    .kpi-title {
+        font-size: 13px;
+        font-weight: 600;
+        opacity: 0.95;
+        margin-bottom: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.8px;
+    }
+    
+    .kpi-value {
+        font-size: 38px;
+        font-weight: 800;
+        margin: 10px 0;
+        text-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        line-height: 1;
+    }
+    
+    .kpi-sub {
+        font-size: 12px;
+        opacity: 0.9;
+        margin-top: 10px;
+        font-weight: 500;
+    }
+    
+    /* Modern Gradients */
+    .kpi-grad-1 { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+    .kpi-grad-2 { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); }
+    .kpi-grad-3 { background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); }
+    .kpi-grad-4 { background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%); }
+    .kpi-grad-5 { background: linear-gradient(135deg, #fa709a 0%, #fee140 100%); }
+    .kpi-grad-6 { background: linear-gradient(135deg, #30cfd0 0%, #330867 100%); }
+    .kpi-grad-7 { background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%); }
+    .kpi-grad-8 { background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%); }
+    
+    /* Section Headers */
+    .section-header {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 24px 28px;
+        border-radius: 14px;
+        margin: 28px 0 20px 0;
+        box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+    }
+    
+    .section-header h2 {
+        margin: 0;
+        font-size: 26px;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+    }
+    
+    /* Breadcrumb */
+    .breadcrumb {
+        background: white;
+        padding: 14px 24px;
+        border-radius: 10px;
+        margin: 18px 0;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        font-size: 14px;
+        font-weight: 500;
+        color: #495057;
+        border-left: 4px solid #667eea;
+    }
+    
+    /* Enhanced Buttons */
+    .stButton button {
+        border-radius: 10px;
+        font-weight: 600;
+        transition: all 0.3s;
+        border: none;
+    }
+    
+    .stButton button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 16px rgba(0,0,0,0.2);
+    }
+    
+    /* Data Cards */
+    .data-card {
+        background: white;
+        padding: 24px;
+        border-radius: 14px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        margin: 16px 0;
+        border-left: 4px solid #667eea;
+    }
+    
+    /* Metrics */
+    div[data-testid="metric-container"] {
+        background: white;
+        padding: 16px;
+        border-radius: 10px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+    
+    /* Info/Warning Boxes */
+    .stAlert {
+        border-radius: 10px;
+        border-left: 4px solid;
+    }
+    
+    /* Sidebar - Keep default styling */
+    /* Removed custom sidebar styling to preserve default filters appearance */
+    
+    /* Tables */
+    .dataframe {
+        border-radius: 10px !important;
+        overflow: hidden;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    }
+    
+    /* Charts */
+    .chart-container {
+        background: white;
+        padding: 24px;
+        border-radius: 14px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        margin: 20px 0;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+# Updated kpi_card_html function with modern styling
+def kpi_card_html(title, value, subtext, grad_class="kpi-grad-1", icon="📊"):
+    """Generate modern KPI card HTML with enhanced styling"""
+    return f"""
+    <div class="kpi-card {grad_class}">
+        <div class="kpi-icon">{icon}</div>
+        <div class="kpi-title">{title}</div>
+        <div class="kpi-value">{value}</div>
+        <div class="kpi-sub">{subtext}</div>
+    </div>
+    """
 # -------------------------
 # Page config (must be first Streamlit call)
 # -------------------------
 st.set_page_config(page_title="🏥 SSSIHMS Hospital Dashboard", page_icon="🏥", layout="wide")
+
+inject_modern_css()
+# Add this function after your inject_modern_css() function in dashboard.py
+
+# Replace the inject_navbar() function and add new sidebar navigation
+
+# def inject_navbar():
+#     """Inject navigation bar at the top of the dashboard (accounting for Streamlit's top bar)"""
+    
+#     # Get user info from session state
+#     staffname = st.session_state.get("staffname", "User")
+#     role = st.session_state.get("role", "staff")
+#     hospitalid = st.session_state.get("hospitalid", "N/A")
+    
+#     st.markdown(f"""
+#     <style>
+#     /* Navbar Styles - Positioned below Streamlit's default top bar */
+#     .navbar {{
+#         background: linear-gradient(135deg, #1a1a2e 0%, #0f3460 100%);
+#         padding: 1rem 2rem;
+#         display: flex;
+#         justify-content: space-between;
+#         align-items: center;
+#         box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+#         border-bottom: 2px solid rgba(96, 165, 250, 0.3);
+#         margin: -1rem -5rem 2rem -5rem;
+#         position: relative;
+#         z-index: 999;
+#     }}
+    
+#     .navbar-left {{
+#         display: flex;
+#         align-items: center;
+#         gap: 1rem;
+#     }}
+    
+#     .navbar-logo {{
+#         width: 40px;
+#         height: 40px;
+#         background: white;
+#         border-radius: 8px;
+#         padding: 5px;
+#         display: flex;
+#         align-items: center;
+#         justify-content: center;
+#         font-size: 24px;
+#     }}
+    
+#     .navbar-title {{
+#         color: white;
+#         font-size: 1.4rem;
+#         font-weight: 700;
+#         letter-spacing: -0.5px;
+#     }}
+    
+#     .navbar-subtitle {{
+#         color: #93c5fd;
+#         font-size: 0.85rem;
+#         margin-top: -2px;
+#     }}
+    
+#     .navbar-right {{
+#         display: flex;
+#         align-items: center;
+#         gap: 1.5rem;
+#     }}
+    
+#     .navbar-user {{
+#         text-align: right;
+#     }}
+    
+#     .navbar-username {{
+#         color: white;
+#         font-weight: 600;
+#         font-size: 0.95rem;
+#     }}
+    
+#     .navbar-role {{
+#         color: #93c5fd;
+#         font-size: 0.8rem;
+#         text-transform: uppercase;
+#     }}
+    
+#     .navbar-hospital {{
+#         background: rgba(96, 165, 250, 0.15);
+#         border: 1px solid rgba(96, 165, 250, 0.3);
+#         padding: 0.5rem 1rem;
+#         border-radius: 8px;
+#         color: #93c5fd;
+#         font-size: 0.85rem;
+#         font-weight: 600;
+#     }}
+#     </style>
+    
+#     <div class='navbar'>
+#         <div class='navbar-left'>
+#             <div class='navbar-logo'>🏥</div>
+#             <div>
+#                 <div class='navbar-title'>SSSIHMS Dashboard</div>
+#                 <div class='navbar-subtitle'>Hospital Management System</div>
+#             </div>
+#         </div>
+#         <div class='navbar-right'>
+#             <div class='navbar-hospital'>🏥 {hospitalid}</div>
+#             <div class='navbar-user'>
+#                 <div class='navbar-username'>👤 {staffname}</div>
+#                 <div class='navbar-role'>{"🛠️ Administrator" if role == "admin" else "👨‍⚕️ Staff"}</div>
+#             </div>
+#         </div>
+#     </div>
+#     """, unsafe_allow_html=True)
+
+# # Call the navbar
+# inject_navbar()
 
 # -------------------------
 # Access guard (login handled in app.py)
@@ -59,10 +887,8 @@ if "authenticated" not in st.session_state or not st.session_state.authenticated
     st.stop()
 
 # -------------------------
-# Oracle connection helper - configure lib_dir if needed
+# Oracle connection helper
 # -------------------------
-# Uncomment & set lib_dir if you use Oracle Instant Client:
-# oracledb.init_oracle_client(lib_dir=r"C:\path\to\instantclient")
 def get_conn():
     return oracledb.connect(
         user="hisapp",
@@ -77,51 +903,47 @@ except Exception as e:
     st.stop()
 
 # -------------------------
-# Styling
+# Sidebar Navigation (matching admin panel design)
 # -------------------------
-st.markdown(
-    """
-<style>
-.kpi-card { padding: 18px; border-radius: 14px; color: white; text-align: center; transition: transform .18s ease, box-shadow .18s ease; border: 1px solid rgba(255,255,255,0.06); margin-bottom: 10px; }
-.kpi-card:hover { transform: translateY(-6px); box-shadow: 0 8px 30px rgba(0,0,0,0.5); }
-.kpi-title { font-size:14px; opacity:0.92; margin-bottom:6px; }
-.kpi-value { font-size:26px; font-weight:800; margin-top:4px; }
-.kpi-sub { font-size:12px; opacity:0.85; margin-top:6px; }
-.kpi-grad-1 { background: linear-gradient(135deg,#0f7769,#0ea77c); }
-.kpi-grad-2 { background: linear-gradient(135deg,#1769ff,#47a7ff); }
-.kpi-grad-3 { background: linear-gradient(135deg,#f6a623,#ffb86b); }
-.kpi-grad-4 { background: linear-gradient(135deg,#ff3b30,#ff6b6b); }
-.kpi-grad-5 { background: linear-gradient(135deg,#7a5cff,#a588ff); }
-.kpi-grad-6 { background: linear-gradient(135deg,#00bfa6,#2ee6c8); }
-.sidebar-buttons { margin-top: 12px; display:flex; gap:8px; }
-</style>
-""",
-    unsafe_allow_html=True,
-)
+st.sidebar.title("🎛️ Navigation")
 
-def kpi_card_html(title, value, subtext, grad_class="kpi-grad-1", icon=""):
-    return f"""
-    <div class="kpi-card {grad_class}">
-        <div class="kpi-title">{icon} {title}</div>
-        <div class="kpi-value">{value}</div>
-        <div class="kpi-sub">{subtext}</div>
-    </div>
-    """
+col1, col2 = st.sidebar.columns(2)
+
+with col1:
+    # Dashboard (current page - disabled to show it's active)
+    st.button("🏠 Dashboard", use_container_width=True, disabled=True, key="nav_dashboard_current")
+    
+    # Change Password
+    if st.button("🔑 Password", use_container_width=True, key="nav_password"):
+        st.switch_page("pages/change_password.py")
+
+with col2:
+    # Admin Panel (only for admins)
+    if st.session_state.get("role") == "admin":
+        if st.button("⚙️ Admin", use_container_width=True, key="nav_admin"):
+            st.switch_page("pages/admin_panel.py")
+    
+    # Logout
+    if st.button("🔒 Logout", use_container_width=True, key="nav_logout"):
+        st.switch_page("app.py")
+
+st.sidebar.markdown("---")
+
+# User info display
+st.sidebar.info(f"""
+👤 **{st.session_state.get('staffname', 'User')}**  
+🏥 **Hospital:** {st.session_state.get('hospitalid', 'N/A')}  
+🔐 **Role:** {'🛡️ Admin' if st.session_state.get('role') == 'admin' else '👨‍⚕️ Staff'}
+""")
+
+st.sidebar.markdown("---")
 
 # -------------------------
-# Sidebar: filters & actions
+# Filters Section
 # -------------------------
-st.sidebar.header("Filters")
+st.sidebar.header("📊 Filters")
 
-# Action buttons -> navigate to existing pages
-st.sidebar.markdown("<div class='sidebar-buttons'>", unsafe_allow_html=True)
-if st.sidebar.button("🔒 Logout"):
-    st.switch_page("app.py")
-if st.sidebar.button("🔑 Change Password"):
-    st.switch_page("pages/change_password.py")
-if st.sidebar.button("⚙️ Admin Panel"):
-    st.switch_page("pages/admin_panel.py")
-st.sidebar.markdown("</div>", unsafe_allow_html=True)
+# ... rest of your existing filter code continues here
 
 # Date range / Year-Month
 today = date.today()
@@ -166,6 +988,9 @@ if user_hospital and user_hospital in hosp_list:
     
 selected_hospital = st.sidebar.selectbox("Hospital", hosp_list, index=default_index)
 
+
+# =================================================================================
+
 # Ordering dept for radiology
 ordering_dept_options = ["All"] + (dept_df["DEPTNAME"].dropna().tolist() if 'dept_df' in globals() else [])
 selected_ordering_dept = st.sidebar.selectbox("Ordering Dept (for Radiology)", ordering_dept_options, index=0)
@@ -179,22 +1004,114 @@ except Exception:
     category_options = ["All"]
 
 selected_category = st.sidebar.selectbox("Category", category_options, index=0)
+# ======================== SURGEON FILTER – FINAL FIXED VERSION ========================
+st.sidebar.subheader("Surgeon Filter")
 
-# Update the sidebar display (around line 174):
-st.sidebar.markdown(f"**Category:** {selected_category}")
-
-# Doctor selector
+# ←←← MAKE SURE safe_sql() IS DEFINED BEFORE THIS BLOCK ←←←
+# (It is defined later in your file — so we define a tiny local version here if missing)
 try:
-    if selected_hospital in (None, "", "All Hospitals"):
-        doctors_df = pd.read_sql("SELECT STAFFID, STAFFNAME FROM STAFFMASTER ORDER BY STAFFNAME", conn)
-    else:
-        safe_h = selected_hospital.replace("'", "''")
-        doctors_df = pd.read_sql(f"SELECT STAFFID, STAFFNAME FROM STAFFMASTER WHERE HOSPITALID = '{safe_h}' ORDER BY STAFFNAME", conn)
-    doctors_list = ["All Doctors"] + doctors_df.apply(lambda r: f"{r['STAFFID']}|{r['STAFFNAME']}", axis=1).tolist()
-except Exception:
-    doctors_list = ["All Doctors"]
-selected_doctor = st.sidebar.selectbox("Doctor (for surgery KPIs)", doctors_list, index=0)
+    _ = safe_sql  # Test if already exists
+except NameError:
+    def safe_sql(v):
+        if v is None:
+            return ""
+        return str(v).replace("'", "''")
 
+# Checkbox: Lifetime vs Current Period
+use_lifetime = st.sidebar.checkbox(
+    "Show surgeons by total lifetime surgeries (not just selected period)",
+    value=True,
+    help="Uncheck to show only surgeons active in the selected date range"
+)
+
+# Safe hospital condition
+hospital_condition = "1=1"
+if selected_hospital and selected_hospital not in ("", "All Hospitals"):
+    hospital_condition = f"sp.HOSPITALID = '{safe_sql(selected_hospital)}'"
+
+# Build query
+if use_lifetime:
+    surgeon_q = f"""
+    SELECT 
+        sp.STAFFID,
+        NVL(sm.STAFFNAME, sp.STAFFID || ' (Name Missing)') AS STAFFNAME,
+        COUNT(*) AS TOTAL_SURGERIES
+    FROM SURGERY_PERSONNEL sp
+    LEFT JOIN STAFFMASTER sm ON sp.STAFFID = sm.STAFFID
+    WHERE sp.STAFFROLE = 'SURGEON'
+      AND {hospital_condition}
+    GROUP BY sp.STAFFID, sm.STAFFNAME
+    HAVING COUNT(*) > 0
+    ORDER BY TOTAL_SURGERIES DESC, STAFFNAME
+    """
+else:
+    surgeon_q = f"""
+    SELECT 
+        sp.STAFFID,
+        NVL(sm.STAFFNAME, sp.STAFFID || ' (Name Missing)') AS STAFFNAME,
+        COUNT(*) AS TOTAL_SURGERIES
+    FROM SURGERY_PERSONNEL sp
+    LEFT JOIN STAFFMASTER sm ON sp.STAFFID = sm.STAFFID
+    JOIN SURGERY s ON sp.SURGERYID = s.SURGERYID
+    WHERE sp.STAFFROLE = 'SURGEON'
+      AND s.SURGERYDATE BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD') 
+                            AND TO_DATE('{to_date}', 'YYYY-MM-DD') + 0.99999
+      AND {hospital_condition}
+    GROUP BY sp.STAFFID, sm.STAFFNAME
+    HAVING COUNT(*) > 0
+    ORDER BY TOTAL_SURGERIES DESC, STAFFNAME
+    """
+
+try:
+    surgeons_df = pd.read_sql(surgeon_q, conn)
+    if not surgeons_df.empty:
+        surgeons_df["DISPLAY"] = surgeons_df.apply(
+            lambda r: f"{r['STAFFNAME']} ({r['TOTAL_SURGERIES']} surgeries)", axis=1
+        )
+        surgeon_options = ["All Surgeons"] + surgeons_df["DISPLAY"].tolist()
+        surgeon_id_map = dict(zip(surgeons_df["DISPLAY"], surgeons_df["STAFFID"]))
+        surgeon_name_map = dict(zip(surgeons_df["DISPLAY"], surgeons_df["STAFFNAME"]))
+    else:
+        surgeon_options = ["All Surgeons"]
+        surgeon_id_map = surgeon_name_map = {}
+except Exception as e:
+    st.sidebar.error(f"Surgeon load failed: {e}")
+    surgeon_options = ["All Surgeons"]
+    surgeon_id_map = surgeon_name_map = {}
+
+selected_doctor_label = st.sidebar.selectbox(
+    "Surgeon (Real performers only)",
+    options=surgeon_options,
+    index=0,
+    key="surgeon_select_final"
+)
+
+# Extract selected surgeon
+selected_surgeon_id = surgeon_id_map.get(selected_doctor_label, None)
+selected_surgeon_name = surgeon_name_map.get(selected_doctor_label, None)
+
+# Optional: Show count in current period
+# Optional: Show count in current period (FIXED — removed undefined 'cterm')
+if selected_surgeon_id and not use_lifetime:
+    try:
+        cnt_q = f"""
+        SELECT COUNT(*) FROM SURGERY s
+        JOIN SURGERY_PERSONNEL sp ON s.SURGERYID = sp.SURGERYID
+        WHERE sp.STAFFROLE = 'SURGEON' 
+          AND sp.STAFFID = '{safe_sql(selected_surgeon_id)}'
+          AND s.SURGERYDATE BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD') 
+                                AND TO_DATE('{to_date}', 'YYYY-MM-DD') + 0.99999
+          AND (s.HOSPITALID = '{safe_sql(selected_hospital)}' OR '{selected_hospital}' = 'All Hospitals')
+        """
+        cnt = pd.read_sql(cnt_q, conn).iloc[0,0]
+        st.sidebar.success(f"Selected period: **{cnt}** surgeries")
+    except Exception as e:
+        st.sidebar.warning(f"Count failed: {e}")
+        cnt = pd.read_sql(cnt_q, conn).iloc[0,0]
+        st.sidebar.success(f"Selected period: **{cnt}** surgeries")
+    except:
+        pass
+# Update the sidebar display (around line 174):
 st.sidebar.markdown(f"**Range:** {from_date} → {to_date}")
 st.sidebar.markdown(f"**Department:** {selected_dept}")
 st.sidebar.markdown(f"**Hospital:** {selected_hospital}")
@@ -244,206 +1161,176 @@ def build_hospital_where(alias_list):
     parts = [f"{a}.HOSPITALID = '{safe}'" for a in alias_list]
     parts.append(f"HOSPITALID = '{safe}'")
     return "(" + " OR ".join(parts) + ")"
-
-def parse_doctor(sel):
-    if not sel or sel == "All Doctors":
-        return None, None
-    if "|" in sel:
-        sid, sname = sel.split("|", 1)
-        return sid, sname
-    return sel, sel
-
-doc_id, doc_name = parse_doctor(selected_doctor)
-
-#Elastic
-def create_es_indices():
-    """Create Elasticsearch indices with mappings"""
-    if not es_client:
-        return False
-    
-    indices_config = {
-        f"{ES_INDEX_PREFIX}patients": {
-            "mappings": {
-                "properties": {
-                    "mrn": {"type": "keyword"},
-                    "patient_name": {"type": "text"},
-                    "dob": {"type": "date"},
-                    "age": {"type": "integer"},
-                    "gender": {"type": "keyword"},
-                    "state": {"type": "keyword"},
-                    "admission_date": {"type": "date"},
-                    "discharge_date": {"type": "date"},
-                    "department": {"type": "keyword"},
-                    "hospital_id": {"type": "keyword"},
-                    "diagnosis": {"type": "text"},
-                    "indexed_at": {"type": "date"}
-                }
-            }
-        },
-        f"{ES_INDEX_PREFIX}surgeries": {
-            "mappings": {
-                "properties": {
-                    "surgery_id": {"type": "keyword"},
-                    "mrn": {"type": "keyword"},
-                    "surgeon_id": {"type": "keyword"},
-                    "surgeon_name": {"type": "text"},
-                    "surgery_date": {"type": "date"},
-                    "surgery_type": {"type": "keyword"},
-                    "department": {"type": "keyword"},
-                    "hospital_id": {"type": "keyword"},
-                    "duration": {"type": "integer"},
-                    "indexed_at": {"type": "date"}
-                }
-            }
-        },
-        f"{ES_INDEX_PREFIX}reports": {
-            "mappings": {
-                "properties": {
-                    "accession_num": {"type": "keyword"},
-                    "mrn": {"type": "keyword"},
-                    "note_name": {"type": "text"},
-                    "visit_type": {"type": "keyword"},
-                    "visit_date": {"type": "date"},
-                    "done_by": {"type": "keyword"},
-                    "department": {"type": "keyword"},
-                    "note_data": {"type": "text"},
-                    "hospital_id": {"type": "keyword"},
-                    "indexed_at": {"type": "date"}
-                }
-            }
-        },
-        f"{ES_INDEX_PREFIX}stats": {
-            "mappings": {
-                "properties": {
-                    "category": {"type": "keyword"},
-                    "subcatg": {"type": "keyword"},
-                    "subcatgl2": {"type": "keyword"},
-                    "the_date": {"type": "date"},
-                    "the_value": {"type": "integer"},
-                    "ordering_dept": {"type": "keyword"},
-                    "hospital_id": {"type": "keyword"},
-                    "indexed_at": {"type": "date"}
-                }
-            }
-        }
-    }
-    
-    for index_name, config in indices_config.items():
-        try:
-            if not es_client.indices.exists(index=index_name):
-                es_client.indices.create(index=index_name, body=config)
-                st.success(f"✅ Created index: {index_name}")
-        except Exception as e:
-            st.error(f"❌ Failed to create index {index_name}: {e}")
-            return False
-    
-    return True
-
-def index_patients_to_es(from_date, to_date, batch_size=1000):
-    """Index patient data from Oracle to Elasticsearch"""
-    if not es_client:
-        return 0
-    
-    query = f"""
-        SELECT 
-            P.MRN, P.PATIENTNAME, P.DOB, P.GENDER, P.STATE,
-            I.DOA as ADMISSION_DATE, I.DAYSCARED, I.DEPTCODE,
-            I.HOSPITALID, I.ADMISSIONTYPE
-        FROM PATIENT P
-        LEFT JOIN INPATIENT I ON P.MRN = I.MRN
-        WHERE I.DOA BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD') 
-                        AND TO_DATE('{to_date}', 'YYYY-MM-DD')
-    """
-    
-    try:
-        df = pd.read_sql(query, conn)
-        
-        actions = []
-        for _, row in df.iterrows():
-            doc = {
-                "_index": f"{ES_INDEX_PREFIX}patients",
-                "_id": f"{row['MRN']}_{row.get('ADMISSION_DATE', '')}",
-                "_source": {
-                    "mrn": row['MRN'],
-                    "patient_name": row.get('PATIENTNAME', ''),
-                    "dob": row.get('DOB'),
-                    "gender": row.get('GENDER', ''),
-                    "state": row.get('STATE', ''),
-                    "admission_date": row.get('ADMISSION_DATE'),
-                    "department": row.get('DEPTCODE', ''),
-                    "hospital_id": row.get('HOSPITALID', ''),
-                    "admission_type": row.get('ADMISSIONTYPE', ''),
-                    "days_cared": row.get('DAYSCARED', 0),
-                    "indexed_at": datetime.now()
-                }
-            }
-            actions.append(doc)
-        
-        if actions:
-            success, failed = bulk(es_client, actions, raise_on_error=False)
-            return success
-        return 0
-        
-    except Exception as e:
-        st.error(f"Failed to index patients: {e}")
-        return 0
-
-
-def index_reports_to_es(batch_size=1000):
-    """Index reports from NOTESDATA to Elasticsearch"""
-    if not es_client:
-        return 0
-    
-    query = """
-        SELECT ACCESSION_NUM, MRN, NOTENAME, VISITTYPE, VISITDATE,
-               DONEBY, DEPTNAME, NOTEDATA
-        FROM NOTESDATA
-        WHERE ROWNUM <= 10000
-    """
-    
-    try:
-        df = pd.read_sql(query, conn)
-        
-        actions = []
-        for _, row in df.iterrows():
-            # Extract text from CLOB
-            note_data = ""
-            if row.get('NOTEDATA'):
-                try:
-                    note_data = row['NOTEDATA'].read() if hasattr(row['NOTEDATA'], 'read') else str(row['NOTEDATA'])
-                except:
-                    note_data = str(row['NOTEDATA'])
-            
-            doc = {
-                "_index": f"{ES_INDEX_PREFIX}reports",
-                "_id": row['ACCESSION_NUM'],
-                "_source": {
-                    "accession_num": row['ACCESSION_NUM'],
-                    "mrn": row['MRN'],
-                    "note_name": row.get('NOTENAME', ''),
-                    "visit_type": row.get('VISITTYPE', ''),
-                    "visit_date": row.get('VISITDATE'),
-                    "done_by": row.get('DONEBY', ''),
-                    "department": row.get('DEPTNAME', ''),
-                    "note_data": note_data[:10000],  # Limit size
-                    "indexed_at": datetime.now()
-                }
-            }
-            actions.append(doc)
-        
-        if actions:
-            success, failed = bulk(es_client, actions, raise_on_error=False)
-            return success
-        return 0
-        
-    except Exception as e:
-        st.error(f"Failed to index reports: {e}")
-        return 0
-    
     
 # -------------------------
 # Data functions
 # -------------------------
+def calculate_bed_occupancy(from_date, to_date, dept_name=None, location_filter=None):
+    """
+    Calculate bed occupancy rate using CENSUSDATA and BEDMASTER
+    Formula: Daily Occupancy = OPBAL + ADMIT - DISCH + TRIN - TROUT - DEATH
+    
+    Returns: occupancy_rate (%), avg_daily_census, total_beds, detail_df
+    """
+    try:
+        # Build bed query with filters
+        bed_query = """
+            SELECT 
+                SPECIALITY,
+                LOCATION,
+                NVL(BEDSTRENGTH, 0) AS BEDSTRENGTH
+            FROM BEDMASTER
+            WHERE STATUS = 'A'
+        """
+        
+        bed_conditions = []
+        
+        # Department filter
+        if dept_name and dept_name not in (None, "", "All"):
+            bed_conditions.append(f"SPECIALITY = '{safe_sql(dept_name)}'")
+        
+        # Location filter
+        if location_filter and location_filter not in (None, "", "All"):
+            bed_conditions.append(f"LOCATION = '{safe_sql(location_filter)}'")
+        
+        # Hospital filter (if needed)
+        if selected_hospital not in (None, "", "All Hospitals"):
+            # Add hospital filter if BEDMASTER has HOSPITALID column
+            # bed_conditions.append(f"HOSPITALID = '{safe_sql(selected_hospital)}'")
+            pass
+        
+        if bed_conditions:
+            bed_query += " AND " + " AND ".join(bed_conditions)
+        
+        bed_df = pd.read_sql(bed_query, conn)
+        total_beds = int(bed_df['BEDSTRENGTH'].sum()) if not bed_df.empty else 0
+        
+        if total_beds == 0:
+            return 0.0, 0.0, 0, pd.DataFrame()
+        
+        # Build census query with matching logic
+        # CENSUSDATA.SPECIALITY should match BEDMASTER.LOCATION
+        census_query = f"""
+            SELECT 
+                THEDATE,
+                SPECIALITY,
+                NVL(OPBAL, 0) AS OPBAL,
+                NVL(ADMIT, 0) AS ADMIT,
+                NVL(DISCH, 0) AS DISCH,
+                NVL(TRIN, 0) AS TRIN,
+                NVL(TROUT, 0) AS TROUT,
+                NVL(DEATH, 0) AS DEATH,
+                (NVL(OPBAL, 0) + NVL(ADMIT, 0) - NVL(DISCH, 0) + NVL(TRIN, 0) - NVL(TROUT, 0) - NVL(DEATH, 0)) AS DAILY_OCCUPANCY
+            FROM CENSUSDATA
+            WHERE THEDATE BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD') 
+                              AND TO_DATE('{to_date}', 'YYYY-MM-DD')
+        """
+        
+        census_conditions = []
+        
+        # Match CENSUSDATA.SPECIALITY with BEDMASTER.LOCATION
+        if location_filter and location_filter not in (None, "", "All"):
+            census_conditions.append(f"SPECIALITY = '{safe_sql(location_filter)}'")
+        elif dept_name and dept_name not in (None, "", "All"):
+            # Get all locations for this department
+            dept_locations = bed_df[bed_df['SPECIALITY'] == dept_name]['LOCATION'].tolist()
+            if dept_locations:
+                location_list = "', '".join([safe_sql(loc) for loc in dept_locations])
+                census_conditions.append(f"SPECIALITY IN ('{location_list}')")
+        
+        if census_conditions:
+            census_query += " AND " + " AND ".join(census_conditions)
+        
+        census_query += " ORDER BY THEDATE, SPECIALITY"
+        
+        census_df = pd.read_sql(census_query, conn)
+        
+        if census_df.empty:
+            return 0.0, 0.0, total_beds, pd.DataFrame()
+        
+        # Calculate metrics
+        total_patient_days = census_df['DAILY_OCCUPANCY'].sum()
+        days_in_period = (to_date - from_date).days + 1
+        available_bed_days = total_beds * days_in_period
+        
+        occupancy_rate = (total_patient_days / available_bed_days * 100) if available_bed_days > 0 else 0.0
+        avg_daily_census = total_patient_days / days_in_period if days_in_period > 0 else 0.0
+        
+        # Return detail dataframe for drill-down
+        return round(occupancy_rate, 2), round(avg_daily_census, 1), total_beds, census_df
+        
+    except Exception as e:
+        st.error(f"Error calculating bed occupancy: {e}")
+        return 0.0, 0.0, 0, pd.DataFrame()
+
+def get_department_occupancy_breakdown(from_date, to_date):
+    """Get bed occupancy breakdown by department"""
+    try:
+        # Get all departments from BEDMASTER
+        dept_query = """
+            SELECT DISTINCT SPECIALITY
+            FROM BEDMASTER
+            WHERE STATUS = 'A' AND SPECIALITY IS NOT NULL
+            ORDER BY SPECIALITY
+        """
+        dept_df = pd.read_sql(dept_query, conn)
+        
+        results = []
+        for dept in dept_df['SPECIALITY']:
+            rate, avg_census, beds, _ = calculate_bed_occupancy(from_date, to_date, dept_name=dept)
+            results.append({
+                'DEPARTMENT': dept,
+                'TOTAL_BEDS': beds,
+                'AVG_CENSUS': avg_census,
+                'OCCUPANCY_RATE': rate
+            })
+        
+        return pd.DataFrame(results)
+    except Exception as e:
+        st.error(f"Error getting department breakdown: {e}")
+        return pd.DataFrame()
+
+
+def get_location_occupancy_breakdown(from_date, to_date, dept_name=None):
+    """Get bed occupancy breakdown by location (ward/ICU level)"""
+    try:
+        # Get locations from BEDMASTER
+        loc_query = """
+            SELECT 
+                SPECIALITY AS DEPARTMENT,
+                LOCATION,
+                BEDSTRENGTH
+            FROM BEDMASTER
+            WHERE STATUS = 'A'
+        """
+        
+        if dept_name and dept_name not in (None, "", "All"):
+            loc_query += f" AND SPECIALITY = '{safe_sql(dept_name)}'"
+        
+        loc_query += " ORDER BY SPECIALITY, LOCATION"
+        
+        loc_df = pd.read_sql(loc_query, conn)
+        
+        results = []
+        for _, row in loc_df.iterrows():
+            rate, avg_census, beds, _ = calculate_bed_occupancy(
+                from_date, to_date, 
+                dept_name=row['DEPARTMENT'], 
+                location_filter=row['LOCATION']
+            )
+            results.append({
+                'DEPARTMENT': row['DEPARTMENT'],
+                'LOCATION': row['LOCATION'],
+                'TOTAL_BEDS': row['BEDSTRENGTH'],
+                'AVG_CENSUS': avg_census,
+                'OCCUPANCY_RATE': rate
+            })
+        
+        return pd.DataFrame(results)
+    except Exception as e:
+        st.error(f"Error getting location breakdown: {e}")
+        return pd.DataFrame()
+    
 def load_inpatients(from_date, to_date, dept_name):
     dept_filter = "1=1" if dept_name in (None, "", "All") else f"D.DEPTNAME = '{safe_sql(dept_name)}'"
     
@@ -855,11 +1742,94 @@ def create_zip_of_reports(reports_df: pd.DataFrame, selected_accessions: list):
     buf.seek(0)
     return buf.read()
 
+# -------------------------------------------------
+# NEW: Full Category PDF Report (All SUBCATG + SUBCATGL2)
+# -------------------------------------------------
+def build_category_pdf(category, from_date, to_date, ordering_dept):
+    """Generate multi-page PDF: one section per SUBCATG with full SUBCATGL2 table"""
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, leftMargin=0.6*inch, rightMargin=0.6*inch,
+                            topMargin=0.8*inch, bottomMargin=0.8*inch)
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name='Center', alignment=TA_CENTER, fontSize=16, leading=18, spaceAfter=12))
+    styles.add(ParagraphStyle(name='SubHeader', fontSize=12, leading=14, spaceBefore=10, spaceAfter=6))
+    styles.add(ParagraphStyle(name='Right', alignment=TA_RIGHT, fontSize=10))
+
+    elements = []
+
+    # Title
+    title = Paragraph(f"<b>Operational Efficiency Report – CATEGORY: {category}</b>", styles['Center'])
+    subtitle = Paragraph(f"<b>Date Range:</b> {from_date} to {to_date} | <b>Generated:</b> {datetime.now().strftime('%Y-%m-%d %H:%M')}", styles['Normal'])
+    elements.extend([title, subtitle, Spacer(1, 0.3*inch)])
+
+    # Get SUBCATG list
+    subcatg_metrics = get_subcatg_metrics(category, from_date, to_date, ordering_dept)
+    if not subcatg_metrics:
+        elements.append(Paragraph("No data available for this category.", styles['Normal']))
+    else:
+        days = (to_date - from_date).days + 1
+
+        for idx, sub in enumerate(subcatg_metrics):
+            subcatg_name = sub['SUBCATG']
+            total_sub = sub['TOTAL']
+            avg_sub = sub['AVG_PER_DAY']
+
+            # SUBCATG Header
+            elements.append(Paragraph(f"<b>SUBCATG:</b> {subcatg_name}", styles['SubHeader']))
+            elements.append(Paragraph(f"Total: <b>{total_sub:,}</b> | Avg/Day: <b>{avg_sub:.2f}</b>", styles['Normal']))
+            elements.append(Spacer(1, 0.15*inch))
+
+            # SUBCATGL2 Table
+            subcatgl2 = get_subcatgl2_metrics(category, subcatg_name, from_date, to_date, ordering_dept)
+            if not subcatgl2:
+                elements.append(Paragraph("<i>No SUBCATGL2 details available.</i>", styles['Normal']))
+            else:
+                df_sub = pd.DataFrame(subcatgl2)
+                df_sub['AVG_PER_DAY'] = df_sub['AVG_PER_DAY'].round(2)
+                df_sub = df_sub.sort_values('TOTAL', ascending=False).reset_index(drop=True)
+                df_sub.insert(0, 'Rank', range(1, len(df_sub) + 1))
+
+                data = [['Rank', 'SUBCATGL2', 'Total', 'Avg/Day']]
+                for _, row in df_sub.iterrows():
+                    data.append([
+                        str(row['Rank']),
+                        str(row['SUBCATGL2']),
+                        f"{row['TOTAL']:,}",
+                        f"{row['AVG_PER_DAY']:.2f}"
+                    ])
+
+                table = Table(data, colWidths=[0.6*inch, 2.8*inch, 1.0*inch, 1.0*inch])
+                table.setStyle(TableStyle([
+                    ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#0ea77c')),
+                    ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+                    ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                    ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                    ('GRID', (0,0), (-1,-1), 0.5, colors.lightgrey),
+                    ('FONTSIZE', (0,0), (-1,-1), 9),
+                ]))
+                elements.append(table)
+
+            # Page break (except last)
+            if idx < len(subcatg_metrics) - 1:
+                elements.append(PageBreak())
+
+    # Footer: Page Numbers
+    def add_page_number(canvas, doc):
+        canvas.saveState()
+        page_num = Paragraph(f"Page {doc.page}", styles['Right'])
+        page_num.wrap(doc.width, doc.bottomMargin)
+        page_num.drawOn(canvas, doc.leftMargin, 0.4*inch)
+        canvas.restoreState()
+
+    doc.build(elements, onFirstPage=add_page_number, onLaterPages=add_page_number)
+    buffer.seek(0)
+    return buffer.getvalue()
 # -------------------------
 # Tabs and rendering
 # -------------------------
 tabs = st.tabs(["🏠 General KPIs", "⚡ Operational Efficiency", "💰 Financial", 
-                "✅ Quality & Safety", "🩺 Surgery Details", "📄 Reports", "📊 Stats"])
+                "✅ Quality & Safety", "🩺 Surgery Details", "📄 Reports", 
+                "📊 Stats", "🎯 Custom Metrics"])  # Added new tab
 
 # ---- TAB 0: General KPIs ----
 with tabs[0]:
@@ -930,15 +1900,93 @@ with tabs[0]:
         st.markdown(kpi_card_html("Morbidity (>15d)", f"{morbidity_rate:.2f}%", f"{morbidity_count} cases", "kpi-grad-6", "📈"), unsafe_allow_html=True)
 
     p1, p2, p3, p4 = st.columns(4)
-    with p1:
-        st.markdown(kpi_card_html("Bed Occupancy Rate", "N/A", "Requires bed census table", "kpi-grad-2", "🛏️"), unsafe_allow_html=True)
-    with p2:
-        st.markdown(kpi_card_html("ER Wait Times", "N/A", "Requires ER timestamps", "kpi-grad-3", "🚑"), unsafe_allow_html=True)
-    with p3:
-        st.markdown(kpi_card_html("Surgery Wait Times", "N/A", "Requires booking timestamps", "kpi-grad-5", "⏳"), unsafe_allow_html=True)
-    with p4:
-        st.markdown(kpi_card_html("Staff : Patients", spr_value, "Direct DB value if available", "kpi-grad-6", "👩‍⚕️"), unsafe_allow_html=True)
 
+# Calculate bed occupancy for the KPI card
+occupancy_rate, avg_census, total_beds, _ = calculate_bed_occupancy(from_date, to_date)
+
+with p1:
+    color = "kpi-grad-2"
+    if occupancy_rate > 95:
+        color = "kpi-grad-5"  # Red for overcrowding
+    elif occupancy_rate > 85:
+        color = "kpi-grad-4"  # Green for optimal
+    elif occupancy_rate < 60:
+        color = "kpi-grad-3"  # Blue for underutilized
+    
+    st.markdown(
+        kpi_card_html(
+            "Bed Occupancy Rate", 
+            f"{occupancy_rate:.1f}%", 
+            f"{avg_census:.0f} / {total_beds} beds avg", 
+            color, 
+            "🛏️"
+        ), 
+        unsafe_allow_html=True
+    )
+
+with p2:
+    st.markdown(kpi_card_html("ER Wait Times", "N/A", "Requires ER timestamps", "kpi-grad-3", "🚑"), unsafe_allow_html=True)
+
+with p3:
+    # Calculate Surgery Wait Time - Match each surgery with closest preceding admission
+    try:
+        wait_time_q = f"""
+        WITH SurgeryAdmission AS (
+            SELECT 
+                s.SURGERYID,
+                s.MRN,
+                s.SURGERYDATE,
+                i.DOA,
+                (s.SURGERYDATE - i.DOA) AS WAIT_DAYS,
+                ROW_NUMBER() OVER (
+                    PARTITION BY s.SURGERYID 
+                    ORDER BY ABS(s.SURGERYDATE - i.DOA)
+                ) AS rn
+            FROM SURGERY s
+            JOIN INPATIENT i ON s.MRN = i.MRN
+            WHERE s.SURGERYDATE BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD') 
+                                    AND TO_DATE('{to_date}', 'YYYY-MM-DD')
+              AND i.DOA IS NOT NULL
+              AND s.SURGERYDATE >= i.DOA
+              AND (s.SURGERYDATE - i.DOA) <= 365
+              AND (s.HOSPITALID = '{safe_sql(selected_hospital)}' OR '{selected_hospital}' = 'All Hospitals')
+        )
+        SELECT 
+            AVG(WAIT_DAYS) AS AVG_WAIT_DAYS,
+            COUNT(*) AS TOTAL_SURGERIES,
+            MIN(WAIT_DAYS) AS MIN_WAIT,
+            MAX(WAIT_DAYS) AS MAX_WAIT
+        FROM SurgeryAdmission
+        WHERE rn = 1 AND WAIT_DAYS >= 0
+        """
+        wait_df = pd.read_sql(wait_time_q, conn)
+        
+        if not wait_df.empty and pd.notna(wait_df['AVG_WAIT_DAYS'].iloc[0]):
+            avg_wait_days = float(wait_df['AVG_WAIT_DAYS'].iloc[0])
+            total_surg = int(wait_df['TOTAL_SURGERIES'].iloc[0])
+            wait_display = f"{avg_wait_days:.1f} days"
+            wait_subtext = f"{total_surg} surgeries tracked"
+        else:
+            wait_display = "N/A"
+            wait_subtext = "No matched admissions"
+    except Exception as e:
+        wait_display = "N/A"
+        wait_subtext = f"Data unavailable"
+    
+    st.markdown(kpi_card_html("Surgery Wait Times", wait_display, wait_subtext, "kpi-grad-5", "⏳"), unsafe_allow_html=True)
+
+with p4:
+    st.markdown(kpi_card_html("Staff : Patients", spr_value, "Direct DB value if available", "kpi-grad-6", "👩‍⚕️"), unsafe_allow_html=True)
+
+    # display_custom_metrics_row(
+    #     conn, 
+    #     from_date, 
+    #     to_date, 
+    #     selected_hospital, 
+    #     selected_dept, 
+    #     kpi_card_html
+    # )
+    
 # ---- TAB 1: Operational Efficiency (Radiology + State-wise) ----
 # Replace the entire TAB 1 section (Operational Efficiency) with this fixed version:
 
@@ -990,6 +2038,9 @@ with tabs[1]:
     # ============================================
     # LEVEL 1: CATEGORY VIEW
     # ============================================
+        # ============================================
+    # LEVEL 1: CATEGORY VIEW + PDF DOWNLOAD
+    # ============================================
     if st.session_state.view_level == 1:
         category_metrics = get_category_metrics(from_date, to_date, selected_category, selected_ordering_dept)
         
@@ -1002,12 +2053,38 @@ with tabs[1]:
             Ordering Dept: {selected_ordering_dept}
             """)
         else:
-            st.markdown("### 📁 Level 1: Categories")
-            st.info("👆 Click on any category card to drill down")
-            
+            st.markdown("### Level 1: Categories")
+            st.info("Click on any category card to drill down")
+
+            # === PDF DOWNLOAD: Select Category + Button ===
+            col_left, col_right = st.columns([3, 1])
+            with col_left:
+                cat_names = [m['CATEGORY'] for m in category_metrics]
+                selected_pdf_cat = st.selectbox(
+                    "Select Category for PDF Report",
+                    options=cat_names,
+                    key="pdf_category_select"
+                )
+            with col_right:
+                if st.button("Download PDF Report", use_container_width=True, type="primary"):
+                    with st.spinner(f"Generating PDF for {selected_pdf_cat}..."):
+                        pdf_bytes = build_category_pdf(
+                            selected_pdf_cat, from_date, to_date, selected_ordering_dept
+                        )
+                        st.download_button(
+                            label="Click to Download PDF",
+                            data=pdf_bytes,
+                            file_name=f"{selected_pdf_cat.replace(' ', '_')}_Full_Report.pdf",
+                            mime="application/pdf",
+                            key="final_pdf_download"
+                        )
+                    st.success("PDF ready! Click above to download.")
+
+            st.markdown("---")
+
+            # === Category Cards (unchanged) ===
             per_row = 3
             rows = (len(category_metrics) + per_row - 1) // per_row
-            
             for r in range(rows):
                 cols = st.columns(per_row)
                 for i in range(per_row):
@@ -1015,21 +2092,17 @@ with tabs[1]:
                     if idx >= len(category_metrics):
                         continue
                     m = category_metrics[idx]
-                    
                     with cols[i]:
-                        # Display KPI card
                         st.markdown(
                             kpi_card_html(
                                 f"{m['CATEGORY']}", 
                                 f"{m['TOTAL']:,}", 
                                 f"Avg/day {m['AVG_PER_DAY']:.2f} • Max {m['MAX_ENTRY']:,}", 
                                 grad_class="kpi-grad-1", 
-                                icon="📁"
+                                icon=""
                             ), 
                             unsafe_allow_html=True
                         )
-                        
-                        # Clickable button below card
                         if st.button(f"View Details →", key=f"cat_{idx}", use_container_width=True):
                             st.session_state.nav_category = m['CATEGORY']
                             st.session_state.view_level = 2
@@ -1216,21 +2289,6 @@ with tabs[1]:
                 st.info("💡 CSV format includes all data with rankings")
 
     st.markdown("---")
-    
-    # # State-wise metrics (keep as is)
-    # st.subheader("State-wise Metrics (STATESTATS)")
-    # if use_year_month:
-    #     ss_df = state_stats_aggregate(from_date, to_date, use_year_month=True, sel_year=sel_year, sel_month=months.index(sel_month)+1)
-    # else:
-    #     ss_df = state_stats_aggregate(from_date, to_date, use_year_month=False)
-    # if not ss_df.empty:
-    #     st.altair_chart(alt.Chart(ss_df).mark_bar().encode(
-    #         x=alt.X('STATE:N', sort='-y', title='State'),
-    #         y=alt.Y('CNT:Q', title='Count'),
-    #         tooltip=['STATE','CNT']
-    #     ).properties(width=900, height=450))
-    # else:
-    #     st.info("No state-wise data available for selected filters.")
 
 # ---- Financial tab (placeholder) ----
 with tabs[2]:
@@ -1261,37 +2319,157 @@ with tabs[3]:
         st.info("No quality metrics source found.")
 
 # ---- Surgery Details tab ----
+# ────────────────────── ENHANCED SURGERY DETAILS TAB ──────────────────────
+# ---- Surgery Details tab – UPGRADED & CLEAN ----
+# ---- Surgery Details tab – FINAL FIXED & SUPERCHARGED ----
 with tabs[4]:
     st.header("Surgery Details")
-    surg_metrics = load_surgery_metrics(from_date, to_date, selected_dept, doc_id)
-    s1, s2, s3, s4 = st.columns(4)
-    with s1:
-        st.markdown(kpi_card_html("Total Surgeries", surg_metrics["total"], f"{from_date} → {to_date}", "kpi-grad-2", "🔪"), unsafe_allow_html=True)
-    with s2:
-        if surg_metrics["bydoc"] is not None:
-            st.markdown(kpi_card_html(f"Surgeries — {doc_name}", surg_metrics["bydoc"], f"Doctor {doc_id}", "kpi-grad-1", "🩺"), unsafe_allow_html=True)
-        else:
-            st.markdown(kpi_card_html("Surgeries — Selected Doctor", "N/A", "Select a doctor", "kpi-grad-1", "🩺"), unsafe_allow_html=True)
-    with s3:
-        st.markdown(kpi_card_html("Top Surgery Type", surg_metrics["top_type"], "Most frequent surgery", "kpi-grad-3", "🏷️"), unsafe_allow_html=True)
-    with s4:
-        st.markdown(kpi_card_html("Daily Avg Surgeries", f"{surg_metrics['daily_avg']:.2f}", f"{(to_date-from_date).days+1} days", "kpi-grad-4", "📅"), unsafe_allow_html=True)
+
+    # Build surgeon filter (if any)
+    surgeon_filter = ""
+    if selected_surgeon_id:
+        surgeon_filter = f"AND EXISTS (SELECT 1 FROM SURGERY_PERSONNEL sp WHERE sp.SURGERYID = s.SURGERYID AND sp.STAFFROLE = 'SURGEON' AND sp.STAFFID = '{safe_sql(selected_surgeon_id)}')"
+
+    # ROBUST JOIN: Trim + Upper case to match even messy data
+    surgery_q = f"""
+    SELECT
+        s.SURGERYID,
+        s.MRN,
+        s.SURGERYDATE,
+        s.OTNUMBER,
+        s.ANAESTHESIA,
+        NVL(TRIM(UPPER(sd.SURGERYNAME)), 'Unknown / Not Mapped') AS PROCEDURE_NAME,
+        NVL(sd.CATEGORY, 'Uncategorized') AS PROC_CATEGORY,
+        NVL(sd.SUBCATEGORY, '-') AS PROC_SUBCATEGORY,
+        NVL(surg_doc.STAFFNAME, 'Unknown Surgeon') AS SURGEON_NAME,
+        NVL(anes_doc.STAFFNAME, 'Not Recorded') AS ANAESTHETIST_NAME,
+        NVL(asst_doc.STAFFNAME, '-') AS ASSISTANT_NAME
+    FROM SURGERY s
+    LEFT JOIN SURGERY_DETAILS sd 
+      ON TRIM(UPPER(s.SURGERYTYPE)) = TRIM(UPPER(sd.SURGERYCODE))
+     AND (s.HOSPITALID = sd.HOSPITALID OR sd.HOSPITALID IS NULL)
+    -- Surgeon
+    LEFT JOIN SURGERY_PERSONNEL sp_surg ON s.SURGERYID = sp_surg.SURGERYID AND sp_surg.STAFFROLE = 'SURGEON'
+    LEFT JOIN STAFFMASTER surg_doc ON sp_surg.STAFFID = surg_doc.STAFFID
+    -- Anaesthetist
+    LEFT JOIN SURGERY_PERSONNEL sp_anes ON s.SURGERYID = sp_anes.SURGERYID AND sp_anes.STAFFROLE = 'ANAESTHETIST'
+    LEFT JOIN STAFFMASTER anes_doc ON sp_anes.STAFFID = anes_doc.STAFFID
+    -- Assistant (optional)
+    LEFT JOIN SURGERY_PERSONNEL sp_asst ON s.SURGERYID = sp_asst.SURGERYID AND sp_asst.STAFFROLE = 'ASSISTANT'
+    LEFT JOIN STAFFMASTER asst_doc ON sp_asst.STAFFID = asst_doc.STAFFID
+    WHERE s.SURGERYDATE BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD')
+                           AND TO_DATE('{to_date}', 'YYYY-MM-DD') + 0.99999
+      AND (s.HOSPITALID = '{safe_sql(selected_hospital)}' OR '{selected_hospital}' = 'All Hospitals')
+      {surgeon_filter}
+    ORDER BY s.SURGERYDATE DESC
+    """
+
+    try:
+        df = pd.read_sql(surgery_q, conn)
+    except Exception as e:
+        st.error(f"Query failed: {e}")
+        df = pd.DataFrame()
+
+    if df.empty:
+        st.warning("No surgeries found for the selected filters.")
+        st.stop()
+
+    total_surgeries = len(df)
+    days = (to_date - from_date).days + 1
+    daily_avg = round(total_surgeries / days, 1)
+
+    # KPIs
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        st.markdown(kpi_card_html("Total Surgeries", f"{total_surgeries:,}", f"{from_date} → {to_date}", "kpi-grad-1", "Cut"), unsafe_allow_html=True)
+    with c2:
+        st.markdown(kpi_card_html("Daily Average", daily_avg, f"{days} days", "kpi-grad-2", "Calendar"), unsafe_allow_html=True)
+    with c3:
+        st.markdown(kpi_card_html("Unique Patients", df["MRN"].nunique(), "Distinct MRNs", "kpi-grad-3", "People"), unsafe_allow_html=True)
+    with c4:
+        st.markdown(kpi_card_html("OT Rooms Used", df["OTNUMBER"].nunique(), "Active theatres", "kpi-grad-4", "Door"), unsafe_allow_html=True)
+    with c5:
+        st.markdown(kpi_card_html("Active Surgeons", df["SURGEON_NAME"].nunique(), "Performed at least 1 surgery", "kpi-grad-5", "Doctor"), unsafe_allow_html=True)
 
     st.markdown("---")
-    try:
-        recent_q = (
-            "SELECT SURGERYID, MRN, SURGEONID, SURGERYDATE, SURGERYTYPE, DEPTCODE, HOSPITALID "
-            "FROM SURGERY "
-            f"WHERE SURGERYDATE BETWEEN TO_DATE('{from_date}', 'YYYY-MM-DD') AND TO_DATE('{to_date}', 'YYYY-MM-DD') "
-            "ORDER BY SURGERYDATE DESC FETCH FIRST 200 ROWS ONLY"
+
+    # === 1. TOP PROCEDURES (Now with real names!) ===
+    st.subheader("Top 20 Procedures Performed")
+    proc = df["PROCEDURE_NAME"].value_counts().head(20).reset_index()
+    proc.columns = ["Procedure", "Count"]
+
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        chart = alt.Chart(proc).mark_bar(color="#00d4aa").encode(
+            y=alt.Y("Procedure:N", sort="-x"),
+            x="Count:Q",
+            tooltip=["Procedure", "Count"]
+        ).properties(height=520)
+        st.altair_chart(chart, use_container_width=True)
+    with col2:
+        st.metric("Total Unique Procedures", len(df["PROCEDURE_NAME"].unique()))
+        st.metric("Most Common", proc.iloc[0]["Procedure"])
+        st.metric("Performed", f"{proc.iloc[0]['Count']:,} times")
+
+    # === 2. FULL PROCEDURE LIST (Downloadable) ===
+    with st.expander("Complete Procedure Master List (All Performed)", expanded=False):
+        full_proc = df["PROCEDURE_NAME"].value_counts().reset_index()
+        full_proc.columns = ["Procedure Name", "Times Performed"]
+        full_proc = full_proc.sort_values("Times Performed", ascending=False).reset_index(drop=True)
+        full_proc.insert(0, "Rank", range(1, len(full_proc)+1))
+
+        search = st.text_input("Search procedure", key="proc_search")
+        display = full_proc[full_proc["Procedure Name"].str.contains(search, case=False, na=False)] if search else full_proc
+
+        st.dataframe(display.style.format({"Times Performed": "{:,}"}), use_container_width=True, height=500)
+
+        csv = full_proc.to_csv(index=False).encode()
+        st.download_button("Download Full List (CSV)", data=csv,
+                           file_name=f"Procedures_{from_date}_to_{to_date}.csv", mime="text/csv")
+
+    st.markdown("---")
+
+    # === 3. DOCTORS LEADERBOARD (Surgeons + Anaesthetists) ===
+    st.subheader("Doctors Leaderboard")
+
+    tab_surg, tab_anes = st.tabs(["Surgeons", "Anaesthetists"])
+
+    with tab_surg:
+        surg_count = df["SURGEON_NAME"].value_counts().head(25).reset_index()
+        surg_count.columns = ["Surgeon", "Surgeries"]
+        surg_count = surg_count[surg_count["Surgeon"] != "Unknown Surgeon"]
+
+        st.altair_chart(
+            alt.Chart(surg_count).mark_bar(color="#ff6b6b").encode(
+                y=alt.Y("Surgeon:N", sort="-x"), x="Surgeries:Q"
+            ).properties(height=600), use_container_width=True
         )
-        recent_df = pd.read_sql(recent_q, conn)
-        if not recent_df.empty:
-            st.dataframe(recent_df)
-        else:
-            st.info("No surgeries found in the selected date range.")
-    except Exception:
-        st.info("Failed to fetch recent surgeries (table may be missing).")
+        st.dataframe(surg_count.style.format({"Surgeries": "{:,}"}), use_container_width=True)
+
+    with tab_anes:
+        anes_count = df["ANAESTHETIST_NAME"].value_counts().head(25).reset_index()
+        anes_count.columns = ["Anaesthetist", "Cases"]
+        anes_count = anes_count[anes_count["Anaesthetist"] != "Not Recorded"]
+
+        st.altair_chart(
+            alt.Chart(anes_count).mark_bar(color="#4ecdc4").encode(
+                y=alt.Y("Anaesthetist:N", sort="-x"), x="Cases:Q"
+            ).properties(height=600), use_container_width=True
+        )
+        st.dataframe(anes_count.style.format({"Cases": "{:,}"}), use_container_width=True)
+
+    st.markdown("---")
+
+    # === 4. Full Register (Optional, collapsible) ===
+    with st.expander("View Full Surgery Register (All Details)"):
+        reg = df[["SURGERYDATE", "MRN", "PROCEDURE_NAME", "SURGEON_NAME", "ANAESTHETIST_NAME", "OTNUMBER", "ANAESTHESIA"]].copy()
+        reg["SURGERYDATE"] = pd.to_datetime(reg["SURGERYDATE"]).dt.strftime("%d-%b-%Y")
+        reg.rename(columns={
+            "SURGERYDATE": "Date", "MRN": "Patient", "PROCEDURE_NAME": "Procedure",
+            "SURGEON_NAME": "Surgeon", "ANAESTHETIST_NAME": "Anaesthetist",
+            "OTNUMBER": "OT", "ANAESTHESIA": "Anaesthesia Type"
+        }, inplace=True)
+        st.dataframe(reg, use_container_width=True, height=500)
 
 # ---- Reports tab ----
 with tabs[5]:
@@ -1376,11 +2554,232 @@ with tabs[5]:
                     )
 
 # ---- Stats Tab ----
+# ---- Stats Tab ----
 with tabs[6]:
     st.header("📊 Patient Stats")
-
+    
+    # ============================================
+    # BED OCCUPANCY ANALYSIS
+    # ============================================
+    st.subheader("🛏️ Bed Occupancy Analysis")
+    
+    # Calculate overall bed occupancy
+    occupancy_rate, avg_census, total_beds, _ = calculate_bed_occupancy(from_date, to_date)
+    
+    # Detailed breakdown tabs (NO KPI cards here)
+    occ_tab1, occ_tab2, occ_tab3 = st.tabs(["📈 Daily Trend", "🏥 By Department", "📍 By Location"])
+    
+    # TAB 1: Daily Trend
+    with occ_tab1:
+        st.markdown("#### Daily Occupancy Trend")
+        
+        # Get daily trend data
+        _, _, _, trend_df = calculate_bed_occupancy(from_date, to_date)
+        
+        if not trend_df.empty:
+            # Aggregate by date
+            daily_agg = trend_df.groupby('THEDATE').agg({
+                'OPBAL': 'sum',
+                'ADMIT': 'sum',
+                'DISCH': 'sum',
+                'TRIN': 'sum',
+                'TROUT': 'sum',
+                'DEATH': 'sum',
+                'DAILY_OCCUPANCY': 'sum'
+            }).reset_index()
+            
+            daily_agg['OCCUPANCY_PCT'] = (daily_agg['DAILY_OCCUPANCY'] / total_beds * 100).round(2)
+            
+            # Summary metrics
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("📊 Total Beds", total_beds)
+            with col2:
+                st.metric("👥 Avg Daily Census", f"{avg_census:.0f}")
+            with col3:
+                peak = daily_agg['DAILY_OCCUPANCY'].max()
+                peak_pct = (peak / total_beds * 100)
+                st.metric("📈 Peak Occupancy", f"{int(peak)} ({peak_pct:.1f}%)")
+            with col4:
+                low = daily_agg['DAILY_OCCUPANCY'].min()
+                low_pct = (low / total_beds * 100)
+                st.metric("📉 Lowest Occupancy", f"{int(low)} ({low_pct:.1f}%)")
+            
+            # Chart
+            chart_data = daily_agg[['THEDATE', 'OCCUPANCY_PCT', 'DAILY_OCCUPANCY', 'ADMIT', 'DISCH']].copy()
+            
+            # Line chart for occupancy
+            line = alt.Chart(chart_data).mark_line(point=True, color='#00d4aa', strokeWidth=3).encode(
+                x=alt.X('THEDATE:T', title='Date'),
+                y=alt.Y('OCCUPANCY_PCT:Q', title='Occupancy %', scale=alt.Scale(domain=[0, max(100, chart_data['OCCUPANCY_PCT'].max() + 10)])),
+                tooltip=[
+                    alt.Tooltip('THEDATE:T', title='Date', format='%d-%b-%Y'),
+                    alt.Tooltip('DAILY_OCCUPANCY:Q', title='Census', format='.0f'),
+                    alt.Tooltip('OCCUPANCY_PCT:Q', title='Occupancy %', format='.2f'),
+                    alt.Tooltip('ADMIT:Q', title='Admissions', format='.0f'),
+                    alt.Tooltip('DISCH:Q', title='Discharges', format='.0f')
+                ]
+            )
+            
+            # Reference lines
+            target_line = alt.Chart(pd.DataFrame({'y': [85], 'label': ['Target 85%']})).mark_rule(
+                color='green', strokeDash=[5, 5], strokeWidth=2
+            ).encode(y='y:Q')
+            
+            critical_line = alt.Chart(pd.DataFrame({'y': [95], 'label': ['Critical 95%']})).mark_rule(
+                color='red', strokeDash=[5, 5], strokeWidth=2
+            ).encode(y='y:Q')
+            
+            st.altair_chart(line + target_line + critical_line, use_container_width=True)
+            
+            # Data table
+            st.markdown("#### 📋 Daily Data Table")
+            display_df = daily_agg.copy()
+            display_df['THEDATE'] = pd.to_datetime(display_df['THEDATE']).dt.strftime('%d-%b-%Y')
+            display_df = display_df.rename(columns={
+                'THEDATE': 'Date',
+                'OPBAL': 'Opening',
+                'ADMIT': 'Admitted',
+                'DISCH': 'Discharged',
+                'TRIN': 'Transfer In',
+                'TROUT': 'Transfer Out',
+                'DEATH': 'Deaths',
+                'DAILY_OCCUPANCY': 'Final Census',
+                'OCCUPANCY_PCT': 'Occupancy %'
+            })
+            
+            st.dataframe(
+                display_df.style.format({
+                    'Opening': '{:.0f}',
+                    'Admitted': '{:.0f}',
+                    'Discharged': '{:.0f}',
+                    'Transfer In': '{:.0f}',
+                    'Transfer Out': '{:.0f}',
+                    'Deaths': '{:.0f}',
+                    'Final Census': '{:.0f}',
+                    'Occupancy %': '{:.2f}%'
+                }).background_gradient(subset=['Occupancy %'], cmap='RdYlGn', vmin=50, vmax=100),
+                use_container_width=True,
+                height=400
+            )
+        else:
+            st.info("No census data available for the selected period.")
+    
+    # TAB 2: By Department
+    with occ_tab2:
+        st.markdown("#### 🏥 Department-wise Bed Occupancy")
+        
+        dept_breakdown = get_department_occupancy_breakdown(from_date, to_date)
+        
+        if not dept_breakdown.empty:
+            # Summary
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("🏥 Total Departments", len(dept_breakdown))
+            with col2:
+                highest = dept_breakdown.loc[dept_breakdown['OCCUPANCY_RATE'].idxmax()]
+                st.metric("📈 Highest Occupancy", f"{highest['DEPARTMENT']}", f"{highest['OCCUPANCY_RATE']:.1f}%")
+            with col3:
+                lowest = dept_breakdown.loc[dept_breakdown['OCCUPANCY_RATE'].idxmin()]
+                st.metric("📉 Lowest Occupancy", f"{lowest['DEPARTMENT']}", f"{lowest['OCCUPANCY_RATE']:.1f}%")
+            
+            # Chart
+            chart = alt.Chart(dept_breakdown).mark_bar().encode(
+                y=alt.Y('DEPARTMENT:N', sort='-x', title='Department'),
+                x=alt.X('OCCUPANCY_RATE:Q', title='Occupancy Rate (%)', scale=alt.Scale(domain=[0, 100])),
+                color=alt.Color('OCCUPANCY_RATE:Q', 
+                    scale=alt.Scale(domain=[0, 60, 85, 95, 100], range=['#3498db', '#2ecc71', '#f39c12', '#e74c3c', '#c0392b']),
+                    legend=None
+                ),
+                tooltip=[
+                    alt.Tooltip('DEPARTMENT:N', title='Department'),
+                    alt.Tooltip('TOTAL_BEDS:Q', title='Total Beds', format=','),
+                    alt.Tooltip('AVG_CENSUS:Q', title='Avg Census', format='.1f'),
+                    alt.Tooltip('OCCUPANCY_RATE:Q', title='Occupancy %', format='.2f')
+                ]
+            ).properties(height=max(300, len(dept_breakdown) * 40))
+            
+            st.altair_chart(chart, use_container_width=True)
+            
+            # Table
+            st.dataframe(
+                dept_breakdown.style.format({
+                    'TOTAL_BEDS': '{:.0f}',
+                    'AVG_CENSUS': '{:.1f}',
+                    'OCCUPANCY_RATE': '{:.2f}%'
+                }).background_gradient(subset=['OCCUPANCY_RATE'], cmap='RdYlGn', vmin=50, vmax=100),
+                use_container_width=True
+            )
+        else:
+            st.info("No department data available.")
+    
+    # TAB 3: By Location
+    with occ_tab3:
+        st.markdown("#### 📍 Location-wise Bed Occupancy (Ward/ICU Level)")
+        
+        # Option to filter by department
+        if not get_department_occupancy_breakdown(from_date, to_date).empty:
+            dept_filter_list = ["All"] + get_department_occupancy_breakdown(from_date, to_date)['DEPARTMENT'].tolist()
+            selected_dept_filter = st.selectbox("Filter by Department", dept_filter_list, key="loc_dept_filter")
+        else:
+            selected_dept_filter = "All"
+        
+        dept_param = None if selected_dept_filter == "All" else selected_dept_filter
+        loc_breakdown = get_location_occupancy_breakdown(from_date, to_date, dept_param)
+        
+        if not loc_breakdown.empty:
+            # Summary
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("📍 Total Locations", len(loc_breakdown))
+            with col2:
+                highest = loc_breakdown.loc[loc_breakdown['OCCUPANCY_RATE'].idxmax()]
+                st.metric("📈 Highest", f"{highest['LOCATION']}", f"{highest['OCCUPANCY_RATE']:.1f}%")
+            with col3:
+                lowest = loc_breakdown.loc[loc_breakdown['OCCUPANCY_RATE'].idxmin()]
+                st.metric("📉 Lowest", f"{lowest['LOCATION']}", f"{lowest['OCCUPANCY_RATE']:.1f}%")
+            
+            # Chart
+            chart = alt.Chart(loc_breakdown).mark_bar().encode(
+                y=alt.Y('LOCATION:N', sort='-x', title='Location'),
+                x=alt.X('OCCUPANCY_RATE:Q', title='Occupancy Rate (%)', scale=alt.Scale(domain=[0, 100])),
+                color=alt.Color('DEPARTMENT:N', legend=alt.Legend(title='Department')),
+                tooltip=[
+                    alt.Tooltip('DEPARTMENT:N', title='Department'),
+                    alt.Tooltip('LOCATION:N', title='Location'),
+                    alt.Tooltip('TOTAL_BEDS:Q', title='Beds', format=','),
+                    alt.Tooltip('AVG_CENSUS:Q', title='Avg Census', format='.1f'),
+                    alt.Tooltip('OCCUPANCY_RATE:Q', title='Occupancy %', format='.2f')
+                ]
+            ).properties(height=max(400, len(loc_breakdown) * 30))
+            
+            st.altair_chart(chart, use_container_width=True)
+            
+            # Table with grouping
+            st.markdown("#### 📋 Detailed Location Data")
+            display_loc = loc_breakdown.copy()
+            st.dataframe(
+                display_loc.style.format({
+                    'TOTAL_BEDS': '{:.0f}',
+                    'AVG_CENSUS': '{:.1f}',
+                    'OCCUPANCY_RATE': '{:.2f}%'
+                }).background_gradient(subset=['OCCUPANCY_RATE'], cmap='RdYlGn', vmin=50, vmax=100),
+                use_container_width=True,
+                height=500
+            )
+        else:
+            st.info("No location data available.")
+    
+    # ============================================
+    # EXISTING PATIENT STATS (AFTER BED OCCUPANCY)
+    # ============================================
+    st.markdown("---")
+    st.markdown("---")
+    
+    # Continue with existing age distribution, admission type, state-wise metrics...
     avg_age, age_dist = compute_age_distribution()
     st.subheader("Age Distribution")
+    # ... rest of your existing stats tab code ...
     if not age_dist.empty:
         chart = alt.Chart(age_dist).mark_bar().encode(
             x="AGE_GROUP",
@@ -1479,6 +2878,64 @@ with tabs[6]:
             tooltip=["STATE","CNT","DATE"]
         ).properties(height=400)
         st.altair_chart(chart_trend, use_container_width=True)
+
+    # ---- TAB 7: Custom Metrics Manager ----
+# ---- TAB 7: Custom Metrics Manager ----
+# ---- TAB 7: Custom Metrics Manager (FIXED & ROBUST) ----
+with tabs[7]:
+    st.header("Custom Metrics Manager")
+
+    # ==================================================================
+    # 1. EARLY SETUP: Create folders + ensure JSON exists (MUST be first!)
+    # ==================================================================
+    try:
+        custom_dir = Path("custom_metrics")
+        templates_dir = custom_dir / "templates"
+        metrics_file = custom_dir / "saved_metrics.json"
+
+        custom_dir.mkdir(exist_ok=True)
+        templates_dir.mkdir(exist_ok=True)
+
+        # Ensure the JSON file exists (create empty if not)
+        if not metrics_file.exists():
+            metrics_file.write_text("{}", encoding="utf-8")
+    except Exception as e:
+        st.error(f"Failed to initialize custom metrics folder: {e}")
+        st.stop()
+
+    # ==================================================================
+    # 2. Re-open DB connection if closed (critical!)
+    # ==================================================================
+    try:
+        if conn.closed:
+            conn = get_conn()
+    except:
+        try:
+            conn = get_conn()
+        except Exception as db_e:
+            st.error(f"Cannot reconnect to database: {db_e}")
+            st.stop()
+
+    # ==================================================================
+    # 3. Optional: Remove forced admin (only for testing)
+    # ==================================================================
+    # Remove this line in production:
+    # st.session_state["role"] = "admin"
+
+    # ==================================================================
+    # 4. Finally render the UI with fresh connection
+    # ==================================================================
+    try:
+        render_custom_metrics_ui(
+            conn=conn,
+            from_date=from_date,
+            to_date=to_date,
+            selected_hospital=selected_hospital,
+            selected_dept=selected_dept
+        )
+    except Exception as e:
+        st.error("Custom Metrics failed to load:")
+        st.exception(e)
 
 # Close DB connection
 try:
